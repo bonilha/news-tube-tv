@@ -1,0 +1,33 @@
+{% if not htmx %}{% extends "base.html" %}{% endif %}
+{% block content %}
+<h1 class="mb-2">Video Queue</h1>
+<p class="text-muted text-sm mb-2">
+    H.264 + AAC{% if encoder %} ({{ encoder }} se precisar reencodar){% endif %}
+    · MP4 dos primeiros {{ download_keep }} da fila.
+    Remux quando o arquivo já está nesse formato.
+</p>
+
+<div class="flex gap-1 mb-2">
+    <button class="btn btn-primary"
+            hx-post="/queue/scan" hx-target="#queue-table" hx-swap="innerHTML">
+        ↻ Scan Channels
+    </button>
+    <button class="btn btn-ghost"
+            hx-post="/queue/expire" hx-target="#queue-table" hx-swap="innerHTML">
+        ⏰ Expire Old
+    </button>
+    <button class="btn btn-ghost"
+            hx-post="/queue/shuffle" hx-target="#queue-table" hx-swap="innerHTML">
+        Randomizar ordem
+    </button>
+    <button class="btn btn-danger"
+            hx-post="/queue/clear" hx-target="#queue-table" hx-swap="innerHTML"
+            hx-confirm="Apagar toda a fila, os arquivos, e escanear de novo?">
+        Apagar fila e escanear
+    </button>
+</div>
+
+<div id="queue-table" hx-get="/queue/table" hx-trigger="every 5s" hx-swap="innerHTML">
+    {% include "partials/queue_table.html" %}
+</div>
+{% endblock %}

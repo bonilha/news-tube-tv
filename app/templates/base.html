@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NewsTube TV</title>
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --sidebar-color: #1e293b;
+            --accent-color: #3b82f6;
+            --text-color: #f1f5f9;
+            --text-muted: #94a3b8;
+            --danger-color: #ef4444;
+            --success-color: #10b981;
+            --card-bg: #1e293b;
+            --border-color: #334155;
+        }
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            display: flex;
+            min-height: 100vh;
+        }
+        aside {
+            width: 240px;
+            min-width: 240px;
+            background-color: var(--sidebar-color);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 1.5rem 1rem;
+        }
+        .brand { margin-bottom: 2rem; font-size: 1.1rem; font-weight: 700; color: var(--accent-color); }
+        .nav-item {
+            padding: 0.625rem 0.75rem;
+            margin-bottom: 0.25rem;
+            border-radius: 0.5rem;
+            transition: background 0.15s;
+            color: var(--text-muted);
+            text-decoration: none;
+            display: block;
+            font-size: 0.9rem;
+        }
+        .nav-item:hover { background: var(--border-color); color: var(--text-color); }
+        .nav-item.active { background: var(--accent-color); color: #fff; }
+        main {
+            flex: 1;
+            overflow-y: auto;
+            padding: 2rem;
+            min-width: 0;
+        }
+        h1, h2, h3 { margin-top: 0; }
+        .btn {
+            padding: 0.5rem 1rem;
+            border-radius: 0.375rem;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 0.875rem;
+            transition: opacity 0.15s;
+        }
+        .btn:active { opacity: 0.8; }
+        .btn-primary { background: var(--accent-color); color: #fff; }
+        .btn-danger { background: var(--danger-color); color: #fff; }
+        .btn-success { background: var(--success-color); color: #fff; }
+        .btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border-color); }
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            padding: 1.25rem;
+        }
+        .grid { display: grid; gap: 1rem; }
+        .grid-2 { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 0.625rem 0.75rem; border-bottom: 1px solid var(--border-color); }
+        th { color: var(--text-muted); font-weight: 500; font-size: 0.8125rem; }
+        td { font-size: 0.875rem; }
+        .status-badge {
+            display: inline-block;
+            padding: 0.2rem 0.625rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.025em;
+        }
+        .status-on { background: var(--success-color); color: #fff; }
+        .status-off { background: #475569; color: #cbd5e1; }
+        .flex { display: flex; }
+        .flex-between { justify-content: space-between; }
+        .flex-center { align-items: center; }
+        .gap-1 { gap: 0.5rem; }
+        .gap-2 { gap: 1rem; }
+        .mb-1 { margin-bottom: 0.5rem; }
+        .mb-2 { margin-bottom: 1rem; }
+        .mb-3 { margin-bottom: 1.5rem; }
+        .text-muted { color: var(--text-muted); }
+        .text-sm { font-size: 0.8125rem; }
+
+        /* Upload drop zone */
+        .drop-zone {
+            border: 2px dashed var(--border-color);
+            border-radius: 0.5rem;
+            padding: 2rem;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.15s;
+        }
+        .drop-zone:hover { border-color: var(--accent-color); }
+
+        /* Mobile */
+        @media (max-width: 768px) {
+            body { flex-direction: column; }
+            aside {
+                width: 100%;
+                min-width: 0;
+                flex-direction: row;
+                padding: 0.75rem 1rem;
+                gap: 0.25rem;
+                overflow-x: auto;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+            }
+            .brand { display: none; }
+            .nav-item { white-space: nowrap; padding: 0.5rem 0.75rem; font-size: 0.8125rem; }
+            main { padding: 1rem; }
+            .grid-2 { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div id="cookie-alert" hidden role="alert" style="display:none; position:fixed; top:0; left:0; right:0; z-index:80; padding:0.875rem 1.25rem; background:#7f1d1d; color:#fff; border-bottom:3px solid #ef4444; font-size:0.95rem;">
+        <strong>Cookies do YouTube inválidos.</strong>
+        <span id="cookie-alert-text"></span>
+    </div>
+    <aside>
+        <div class="brand">NewsTube TV</div>
+        <a href="/" class="nav-item active" id="nav-dashboard"
+           hx-get="/" hx-target="#content" hx-push-url="true"
+           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-dashboard').classList.add('active')">
+            Dashboard
+        </a>
+        <a href="/scenes" class="nav-item" id="nav-scenes"
+           hx-get="/scenes" hx-target="#content" hx-push-url="true"
+           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-scenes').classList.add('active')">
+            Scenes
+        </a>
+        <a href="/assets" class="nav-item" id="nav-assets"
+           hx-get="/assets" hx-target="#content" hx-push-url="true"
+           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-assets').classList.add('active')">
+            Assets
+        </a>
+        <a href="/channels" class="nav-item" id="nav-channels"
+           hx-get="/channels" hx-target="#content" hx-push-url="true"
+           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-channels').classList.add('active')">
+            Channels
+        </a>
+        <a href="/queue" class="nav-item" id="nav-queue"
+           hx-get="/queue" hx-target="#content" hx-push-url="true"
+           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-queue').classList.add('active')">
+            Queue
+        </a>
+
+    </aside>
+    <main id="content">
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+    (function () {
+        var box = document.getElementById("cookie-alert");
+        var text = document.getElementById("cookie-alert-text");
+        var ctx = null;
+        var timer = null;
+        var running = false;
+        function beep() {
+            if (!ctx) ctx = new (window.AudioContext || window.webkitAudioContext)();
+            if (ctx.state === "suspended") ctx.resume();
+            var osc = ctx.createOscillator();
+            var gain = ctx.createGain();
+            osc.type = "square";
+            osc.frequency.value = 880;
+            gain.gain.value = 0.08;
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.25);
+        }
+        function startAlarm() {
+            if (running) return;
+            running = true;
+            beep();
+            timer = setInterval(beep, 700);
+        }
+        function stopAlarm() {
+            running = false;
+            if (timer) clearInterval(timer);
+            timer = null;
+        }
+        document.addEventListener("pointerdown", function () {
+            if (running) beep();
+        }, { once: true });
+        function apply(data) {
+            if (data && data.ok) {
+                box.hidden = true;
+                box.style.display = "none";
+                stopAlarm();
+                return;
+            }
+            text.textContent = " " + ((data && data.message) || "Os vídeos não serão baixados.");
+            box.hidden = false;
+            box.style.display = "block";
+            startAlarm();
+        }
+        function poll() {
+            fetch("/api/queue/cookies", { headers: { "Accept": "application/json" } })
+                .then(function (r) { return r.ok ? r.json() : null; })
+                .then(function (data) { if (data) apply(data); })
+                .catch(function () {});
+        }
+        poll();
+        setInterval(poll, 30000);
+    })();
+    </script>
+</body>
+</html>

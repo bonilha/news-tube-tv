@@ -1,0 +1,32 @@
+{% if not htmx %}{% extends "base.html" %}{% endif %}
+{% block content %}
+<h1 class="mb-2">Channel Control</h1>
+
+<div class="flex gap-1 mb-3">
+    <button class="btn btn-success" hx-post="/api/streaming/start" hx-swap="none"
+            hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">
+        Start Stream
+    </button>
+    <button class="btn btn-danger" hx-post="/api/streaming/stop" hx-swap="none"
+            hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">
+        Stop Stream
+    </button>
+    <button class="btn btn-success" hx-post="/api/cycle/enable" hx-swap="none"
+            hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">
+        ▶ Enable
+    </button>
+    <button class="btn btn-danger" hx-post="/api/cycle/disable" hx-swap="none"
+            hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">
+        ■ Disable
+    </button>
+</div>
+
+<div id="dash-live" hx-get="/dashboard/live" hx-trigger="load, every 3s" hx-swap="innerHTML">
+    <p class="text-muted">Checking OBS...</p>
+</div>
+
+<h2 class="mb-1">Scenes</h2>
+<div id="scene-list" hx-get="/scenes" hx-trigger="load">
+    Loading scenes...
+</div>
+{% endblock %}

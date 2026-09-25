@@ -1,0 +1,9 @@
+data.db
+*.db
+*.db-journal
+cookies/
+videos/
+assets/
+.env
+__pycache__/
+*.pyc

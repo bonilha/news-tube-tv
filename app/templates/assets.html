@@ -1,0 +1,100 @@
+{% if not htmx %}{% extends "base.html" %}{% endif %}
+{% block content %}
+<h1 class="mb-2">Assets</h1>
+
+<div class="card mb-3">
+    <div class="drop-zone" id="drop-zone">
+        <input type="file" name="file" id="file-input" style="display:none" multiple
+               onchange="uploadFiles(this.files)">
+        <label for="file-input" style="cursor:pointer; color:var(--accent-color)">
+            <strong>Click to upload</strong> or drag &amp; drop files here
+        </label>
+        <div id="upload-status" class="text-sm text-muted mt-1" style="min-height:1.2em"></div>
+    </div>
+</div>
+
+<div id="assets-table">
+    {% include "partials/asset_table.html" %}
+</div>
+
+<style>
+.drop-zone.drag-over {
+    border-color: var(--accent-color);
+    background: rgba(59, 130, 246, 0.08);
+}
+.mt-1 { margin-top: 0.5rem; }
+.upload-progress { color: var(--accent-color); }
+.upload-error   { color: var(--danger-color); }
+.upload-ok      { color: var(--success-color); }
+</style>
+
+<script>
+(function () {
+    const zone    = document.getElementById('drop-zone');
+    const statusEl = document.getElementById('upload-status');
+
+    // ── Drag-and-drop events ──────────────────────────────────────────────
+    zone.addEventListener('dragenter', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+    zone.addEventListener('dragover',  e => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; zone.classList.add('drag-over'); });
+    zone.addEventListener('dragleave', e => { if (!zone.contains(e.relatedTarget)) zone.classList.remove('drag-over'); });
+    zone.addEventListener('drop', e => {
+        e.preventDefault();   // ← prevents browser from opening the file
+        zone.classList.remove('drag-over');
+        const files = e.dataTransfer.files;
+        if (files.length) uploadFiles(files);
+    });
+
+    // ── Upload logic ──────────────────────────────────────────────────────
+    window.uploadFiles = async function(files) {
+        const fileArr = Array.from(files);
+        statusEl.innerHTML = '';
+
+        for (const file of fileArr) {
+            const line = document.createElement('div');
+            line.className = 'upload-progress';
+            line.textContent = `⏳ Uploading ${file.name}…`;
+            statusEl.appendChild(line);
+
+            try {
+                const fd = new FormData();
+                fd.append('file', file);
+
+                const resp = await fetch('/assets/upload', {
+                    method: 'POST',
+                    body: fd,
+                    // credentials: 'include' sends browser-stored Basic Auth cookies/headers
+                    credentials: 'include',
+                });
+
+                if (resp.status === 401) {
+                    line.className = 'upload-error';
+                    line.textContent = `⚠ ${file.name} — not authorized (reload page and re-enter credentials)`;
+                    continue;
+                }
+                if (!resp.ok) {
+                    const reason = (await resp.text()).trim();
+                    line.className = 'upload-error';
+                    line.textContent = `✗ ${file.name} — ${reason || ('server error ' + resp.status)}`;
+                    continue;
+                }
+
+                // Server returns the updated asset_table partial — swap it in
+                const html = await resp.text();
+                document.getElementById('assets-table').innerHTML = html;
+                // Re-process HTMX on newly inserted DOM
+                htmx.process(document.getElementById('assets-table'));
+
+                line.className = 'upload-ok';
+                line.textContent = `✓ ${file.name} uploaded`;
+            } catch (err) {
+                line.className = 'upload-error';
+                line.textContent = `✗ ${file.name} — ${err.message}`;
+            }
+        }
+
+        // Clear status after 4 s
+        setTimeout(() => { statusEl.innerHTML = ''; }, 4000);
+    };
+})();
+</script>
+{% endblock %}

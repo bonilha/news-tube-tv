@@ -1,0 +1,13 @@
+<tr>
+    <td>{{ asset.original_name }}</td>
+    <td>{{ (asset.size / 1024) | round(2) }} KB</td>
+    <td>{{ asset.created_at }}</td>
+    <td>
+        <button class="btn btn-danger" 
+                hx-delete="/assets/{{ asset.id }}" 
+                hx-target="#assets-table"
+                hx-confirm="Are you sure?">
+            Delete
+        </button>
+    </td>
+</tr>

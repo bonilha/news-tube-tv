@@ -1,0 +1,3 @@
+[submodule "obs-api"]
+	path = obs-api
+	url = https://github.com/Bonilha/obs-api.git

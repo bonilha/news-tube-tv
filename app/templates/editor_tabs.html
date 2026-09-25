@@ -1,0 +1,9 @@
+{% for scene in scenes %}
+<button type="button" class="tab-btn {% if scene.sceneName == selected_scene %}active{% endif %}"
+        data-scene="{{ scene.sceneName }}"
+        onclick="selectScene(this.dataset.scene)">
+    {{ scene.sceneName }}
+</button>
+{% else %}
+<span class="text-muted text-sm">No scenes in OBS</span>
+{% endfor %}

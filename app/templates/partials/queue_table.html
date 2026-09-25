@@ -1,0 +1,123 @@
+{% if scan_stats is defined and scan_stats %}
+<div class="card mb-2" style="border-color:{% if scan_stats.error %}var(--danger-color){% else %}var(--success-color){% endif %}">
+    {% if scan_stats.error %}
+    <span style="color:var(--danger-color)">{{ scan_stats.error }}</span>
+    {% else %}
+    <span style="color:var(--success-color)">✓ Scan: {{ scan_stats.added }} added, {{ scan_stats.skipped }} skipped, {{ scan_stats.errors }} errors{% if scan_stats.cleared is defined %} · {{ scan_stats.cleared }} removidos da fila{% endif %}</span>
+    {% endif %}
+</div>
+{% endif %}
+
+{% if expired_count is defined and expired_count %}
+<div class="card mb-2" style="border-color:var(--text-muted)">
+    <span class="text-muted">⏰ {{ expired_count }} video(s) expired</span>
+</div>
+{% endif %}
+
+{% if items %}
+<table>
+    <thead>
+        <tr>
+            <th>#</th>
+            <th>Title</th>
+            <th>Channel</th>
+            <th>Duration</th>
+            <th>Published</th>
+            <th>Status</th>
+            <th>Transmissão</th>
+            <th>File</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for item in items %}
+        <tr>
+            <td class="text-muted text-sm">{{ loop.index }}</td>
+            <td>
+                <div class="flex flex-center gap-1">
+                    {% if item.thumb %}
+                    <img src="{{ item.thumb }}" alt="" style="width:80px; height:45px; object-fit:cover; border-radius:0.25rem;">
+                    {% endif %}
+                    <div>
+                        <a href="https://youtube.com/watch?v={{ item.video_id }}" target="_blank"
+                           style="color:var(--accent-color); text-decoration:none;">
+                            {{ item.title[:60] }}{% if item.title|length > 60 %}…{% endif %}
+                        </a>
+                    </div>
+                </div>
+            </td>
+            <td class="text-muted text-sm">{{ item.channel_name }}</td>
+            <td class="text-sm">
+                {% set h = (item.duration // 3600) %}
+                {% set m = ((item.duration % 3600) // 60) %}
+                {% set s = (item.duration % 60) %}
+                {% if h %}{{ h }}:{% endif %}{{ '%02d'|format(m) }}:{{ '%02d'|format(s) }}
+            </td>
+            <td class="text-muted text-sm">
+                {% if item.published_unix %}
+                    {{ item.published_unix | int | timestamp_fmt }}
+                {% else %}
+                    —
+                {% endif %}
+            </td>
+            <td>
+                {% if item.video_id == on_air %}
+                    <span class="status-badge status-on">no ar</span>
+                {% elif item.video_id in aired %}
+                    <span class="status-badge">transmitido</span>
+                {% elif item.status == 'pending' %}
+                    <span class="status-badge" style="background:var(--accent-color); color:#fff;">PENDING</span>
+                {% elif item.status == 'playing' %}
+                    <span class="status-badge status-on">PLAYING</span>
+                {% elif item.status == 'played' %}
+                    <span class="status-badge" style="background:#1e40af; color:#fff;">PLAYED</span>
+                {% else %}
+                    <span class="status-badge status-off">{{ item.status | upper }}</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if item.video_id == on_air %}
+                    <span class="status-badge status-on">no ar</span>
+                {% elif item.video_id in aired %}
+                    <span class="status-badge">transmitido</span>
+                {% else %}
+                    <span class="text-muted">—</span>
+                {% endif %}
+            </td>
+            <td class="text-sm">
+                {% if item.local_path %}
+                    <span class="status-badge status-on">MP4</span>
+                {% elif item.download_error %}
+                    <span class="status-badge status-off" title="{{ item.download_error }}">ERRO</span>
+                {% else %}
+                    <span class="text-muted">—</span>
+                {% endif %}
+            </td>
+            <td>
+                <div class="flex gap-1">
+                    {% if item.status == 'pending' %}
+                    <button class="btn btn-success" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
+                            hx-post="/queue/{{ item.id }}/status/playing" hx-target="#queue-table" hx-swap="innerHTML">
+                        ▶ Play
+                    </button>
+                    {% endif %}
+                    {% if item.status == 'playing' %}
+                    <button class="btn btn-primary" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
+                            hx-post="/queue/{{ item.id }}/status/played" hx-target="#queue-table" hx-swap="innerHTML">
+                        ✓ Done
+                    </button>
+                    {% endif %}
+                    <button class="btn btn-danger" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
+                            hx-delete="/queue/{{ item.id }}" hx-target="#queue-table" hx-swap="innerHTML"
+                            hx-confirm="Remove from queue?">
+                        ✕
+                    </button>
+                </div>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="text-muted">Queue is empty. Click "Scan Channels" to populate.</p>
+{% endif %}

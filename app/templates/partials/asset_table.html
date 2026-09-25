@@ -1,0 +1,33 @@
+{% if assets %}
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Size</th>
+            <th>Uploaded</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for asset in assets %}
+        <tr>
+            <td>{{ asset.original_name }}</td>
+            <td class="text-muted text-sm">{{ asset.mime_type }}</td>
+            <td>{{ (asset.size / 1024) | round(1) }} KB</td>
+            <td class="text-muted text-sm">{{ asset.created_at }}</td>
+            <td>
+                <button class="btn btn-ghost"
+                        hx-delete="/assets/{{ asset.id }}"
+                        hx-target="#assets-table"
+                        hx-confirm="Delete {{ asset.original_name }}?">
+                    Delete
+                </button>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p class="text-muted">No assets uploaded yet.</p>
+{% endif %}

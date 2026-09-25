@@ -1,0 +1,61 @@
+<div class="grid grid-2 mb-3">
+    <div class="card">
+        <h3>Streaming</h3>
+        <div id="status-streaming" class="mb-1">
+            {% if status.connected and status.is_streaming %}
+            <span class="status-badge status-on">LIVE</span>
+            {% else %}
+            <span class="status-badge status-off">OFFLINE</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="card">
+        <h3>Current State</h3>
+        <div id="status-state" class="text-sm text-muted">
+            {% if not status.connected %}
+            <span style="color:var(--danger-color)">⚠ OBS not connected</span><br>
+            <span class="text-muted">Make sure OBS is running and WebSocket is enabled (Tools → WebSocket Server Settings).</span>
+            {% else %}
+            <p class="mb-1">Scene: <strong>{{ status.current_scene }}</strong></p>
+            <p class="mb-1">Resolution: <strong>{{ status.resolution }}</strong></p>
+            <p class="mb-1">FPS: <strong>{{ status.fps }}</strong></p>
+            <p>OBS WS: <strong>{{ status.obs_version or "connected" }}</strong></p>
+            {% endif %}
+        </div>
+        <div class="mt-1" id="reconnect-wrap" style="{% if status.connected %}display:none{% endif %}">
+            <button class="btn btn-ghost" id="btn-reconnect"
+                    hx-post="/api/obs/reconnect" hx-swap="none"
+                    hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">↺ Retry connection</button>
+        </div>
+    </div>
+</div>
+
+<div class="grid grid-2 mb-3">
+    <div class="card">
+        <h3>Queue Player</h3>
+        <div id="cycle-status" class="mb-1">
+            {% if cycle.enabled %}
+            <span class="status-badge status-on">{{ cycle.state | upper }}</span>
+            {% else %}
+            <span class="status-badge status-off">DISABLED</span>
+            {% endif %}
+        </div>
+    </div>
+    <div class="card">
+        <h3>Cycle State</h3>
+        <div id="cycle-state" class="text-sm text-muted">
+            {% if cycle.message %}
+            <span {% if cycle.error %}style="color:var(--danger-color)"{% endif %}>{{ cycle.message }}</span>
+            {% elif not cycle.enabled %}
+            No cycle active
+            {% elif cycle.state == 'stopped' %}
+            Waiting…
+            {% else %}
+            <p class="mb-1">Scene: <strong>{{ cycle.state }}</strong></p>
+            {% if cycle.current_video_title %}
+            <p class="mb-1">Playing: <strong>{{ cycle.current_video_title }}</strong></p>
+            {% endif %}
+            {% endif %}
+        </div>
+    </div>
+</div>

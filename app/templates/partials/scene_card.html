@@ -1,0 +1,10 @@
+<div class="card">
+    <h3>{{ scene.name }}</h3>
+    <p style="color: var(--text-muted); font-size: 0.875rem;">{{ scene.description or 'No description' }}</p>
+    <button class="btn btn-primary w-100" 
+            hx-post="/api/scenes/{{ scene.name }}/switch" 
+            hx-target="#status-bar"
+            style="padding: 0.5rem 1rem;">
+        Switch
+    </button>
+</div>

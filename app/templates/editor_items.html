@@ -1,0 +1,29 @@
+{% for item in items %}
+{% set tf = item.sceneItemTransform or {} %}
+<div class="source-item" draggable="true"
+     data-item-id="{{ item.sceneItemId }}"
+     data-index="{{ item.sceneItemIndex }}"
+     data-source="{{ item.sourceName }}"
+     onclick="selectItem({{ item.sceneItemId }}, {{ tf.positionX | default(0) }}, {{ tf.positionY | default(0) }}, {{ tf.width | default(0) }}, {{ tf.height | default(0) }}, {{ tf.rotation | default(0) }}, this.dataset.source)"
+     ondragstart="dragStart(event, {{ item.sceneItemId }})"
+     ondragend="dragEnd(event)"
+     ondragover="dragOver(event)"
+     ondrop="dropItem(event, {{ item.sceneItemIndex }})">
+    <span class="drag-handle" title="Arrastar para reordenar">⠿</span>
+    <span class="name" title="{{ item.sourceName }}">{{ item.sourceName }}</span>
+    <div class="actions">
+        <button title="Trazer para a frente"
+                onclick="event.stopPropagation(); moveSource({{ item.sceneItemId }}, {{ item.sceneItemIndex + 1 }})">▲</button>
+        <button title="Enviar para trás"
+                onclick="event.stopPropagation(); moveSource({{ item.sceneItemId }}, {{ item.sceneItemIndex - 1 }})">▼</button>
+        <button title="Toggle visibility"
+                onclick="event.stopPropagation(); toggleVisibility({{ item.sceneItemId }}, {{ 'true' if not item.sceneItemEnabled else 'false' }})">
+            {% if item.sceneItemEnabled %}👁{% else %}🚫{% endif %}
+        </button>
+        <button title="Remove"
+                onclick="event.stopPropagation(); if(confirm('Remove {{ item.sourceName }}?')) removeSource({{ item.sceneItemId }})">✕</button>
+    </div>
+</div>
+{% else %}
+<p class="text-muted text-sm">No sources in this scene. Click "+ Add" above.</p>
+{% endfor %}
