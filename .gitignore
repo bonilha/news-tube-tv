@@ -3,7 +3,7 @@ data.db
 *.db-journal
 cookies/
 videos/
-assets/
+/assets/
 .env
 __pycache__/
 *.pyc
