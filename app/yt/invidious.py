@@ -173,6 +173,7 @@ def is_eligible(
     min_age_hours: float,
     shorts_ids: set[str] | None = None,
     now_unix: int | None = None,
+    max_duration_minutes: int | float | None = None,
 ) -> tuple[bool, str]:
     """Check if a video is eligible for the queue. Returns (eligible, reason)."""
     import time as _time
@@ -184,6 +185,10 @@ def is_eligible(
     length = int(meta.get("duracao") or meta.get("lengthSeconds") or 0)
     if length <= 0:
         return False, "Duração inválida"
+
+    max_minutes = max_duration_minutes if max_duration_minutes is not None else settings.QUEUE_MAX_DURATION_MINUTES
+    if max_minutes > 0 and length > (max_minutes * 60):
+        return False, f"Duração longa demais ({length // 60}m > {max_minutes}m)"
 
     published = meta.get("publicacao_unix") or meta.get("published")
     if published is None:

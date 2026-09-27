@@ -380,6 +380,7 @@ class CycleManager:
                         return
                     self._aired = set()
                     self._publish_keep_skip()
+                    await queue_svc.reset_played_to_pending()
                     await queue_svc.shuffle_play_order(reset_files=False)
                     await self._load_pass()
                     played_any = False
@@ -393,6 +394,7 @@ class CycleManager:
                 file_path = video.get("local_path") or ""
                 self._current_id = video.get("video_id") or ""
                 self._protect()
+                await queue_svc.mark_status_by_video_id(self._current_id, "playing")
                 await obs_manager.set_input_settings(PLAYER_SOURCE, {
                     "is_local_file": True,
                     "local_file": file_path,
@@ -408,6 +410,7 @@ class CycleManager:
                 await self._wait_end(PLAYER_SOURCE)
                 if self._current_id:
                     self._aired.add(self._current_id)
+                    await queue_svc.mark_status_by_video_id(self._current_id, "played")
                 self._current_id = ""
                 self._protect()
                 self._publish_keep_skip()

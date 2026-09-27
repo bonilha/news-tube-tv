@@ -24,7 +24,6 @@
             <th>Duration</th>
             <th>Published</th>
             <th>Status</th>
-            <th>Transmissão</th>
             <th>File</th>
             <th>Actions</th>
         </tr>
@@ -61,40 +60,33 @@
                 {% endif %}
             </td>
             <td>
-                {% if item.video_id == on_air %}
-                    <span class="status-badge status-on">no ar</span>
-                {% elif item.video_id in aired %}
-                    <span class="status-badge">transmitido</span>
+                {% if item.video_id == on_air or item.status == 'playing' %}
+                    <span class="status-badge status-on">NO AR</span>
+                {% elif item.video_id in aired or item.status == 'played' %}
+                    <span class="status-badge" style="background:#1e40af; color:#fff;">TRANSMITIDO</span>
                 {% elif item.status == 'pending' %}
-                    <span class="status-badge" style="background:var(--accent-color); color:#fff;">PENDING</span>
-                {% elif item.status == 'playing' %}
-                    <span class="status-badge status-on">PLAYING</span>
-                {% elif item.status == 'played' %}
-                    <span class="status-badge" style="background:#1e40af; color:#fff;">PLAYED</span>
+                    <span class="status-badge" style="background:var(--accent-color); color:#fff;">NA FILA</span>
                 {% else %}
                     <span class="status-badge status-off">{{ item.status | upper }}</span>
-                {% endif %}
-            </td>
-            <td>
-                {% if item.video_id == on_air %}
-                    <span class="status-badge status-on">no ar</span>
-                {% elif item.video_id in aired %}
-                    <span class="status-badge">transmitido</span>
-                {% else %}
-                    <span class="text-muted">—</span>
                 {% endif %}
             </td>
             <td class="text-sm">
                 {% if item.local_path %}
                     <span class="status-badge status-on">MP4</span>
                 {% elif item.download_error %}
-                    <span class="status-badge status-off" title="{{ item.download_error }}">ERRO</span>
+                    <span class="status-badge status-off" title="{{ item.download_error }}" style="cursor:help;">ERRO</span>
                 {% else %}
                     <span class="text-muted">—</span>
                 {% endif %}
             </td>
             <td>
                 <div class="flex gap-1">
+                    {% if item.download_error %}
+                    <button class="btn btn-ghost" style="padding:0.25rem 0.5rem; font-size:0.75rem;" title="Tentar baixar novamente"
+                            hx-post="/queue/{{ item.id }}/retry" hx-target="#queue-table" hx-swap="innerHTML">
+                        ↻ Baixar
+                    </button>
+                    {% endif %}
                     {% if item.status == 'pending' %}
                     <button class="btn btn-success" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
                             hx-post="/queue/{{ item.id }}/status/playing" hx-target="#queue-table" hx-swap="innerHTML">

@@ -117,9 +117,12 @@ def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list
     if limit <= 0:
         return []
     skipped = skip or set()
+    max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     eligible = [
         row for row in rows
-        if row.get("status") in _KEEP_STATUSES and row.get("video_id") not in skipped
+        if row.get("status") in _KEEP_STATUSES
+        and row.get("video_id") not in skipped
+        and int(row.get("duration") or 0) <= max_duration_sec
     ]
     shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
     if shuffled:
@@ -145,8 +148,30 @@ def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> li
     fresh = keep_ids(rows, limit, skip)
     if len(fresh) >= limit:
         return fresh
-    more = keep_ids(rows, limit - len(fresh), set(fresh))
-    return fresh + [video_id for video_id in more if video_id not in fresh]
+    # When unplayed videos are not enough to fill limit, fill from unskipped rows (including played)
+    remaining_limit = limit - len(fresh)
+    seen = set(fresh) | (skip or set())
+    filler: list[str] = []
+    shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
+    max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
+    candidates = [
+        row for row in rows
+        if row.get("status") in ("playing", "pending", "played")
+        and row.get("video_id") not in seen
+        and int(row.get("duration") or 0) <= max_duration_sec
+    ]
+    if shuffled:
+        candidates.sort(key=lambda r: (int(r.get("play_order") or 0), int(r.get("id") or 0)))
+    else:
+        candidates.sort(key=lambda r: (int(r.get("published_unix") or 0), int(r.get("id") or 0)))
+    for r in candidates:
+        if len(filler) >= remaining_limit:
+            break
+        vid = r.get("video_id")
+        if vid and vid not in seen:
+            filler.append(vid)
+            seen.add(vid)
+    return fresh + filler
 
 
 def files_outside_keep(directory: Path, keep: set[str]) -> list[Path]:
@@ -220,18 +245,20 @@ async def _sync_loop() -> None:
 
 
 async def purge_expired() -> int:
-    """Delete expired rows and pending videos older than 24h, plus their files.
+    """Delete expired rows, pending videos older than 24h, and videos exceeding max duration, plus files.
 
     Ids still needed by the live pass stay in the queue until that pass ends.
     """
     cutoff = int(time.time()) - 86400
+    max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     protected = set(_protected_ids)
     async with get_db() as db:
         cursor = await db.execute(
             """SELECT video_id, local_path FROM queue
                WHERE status = 'expired'
-                  OR (status = 'pending' AND published_unix < ?)""",
-            (cutoff,),
+                  OR (status = 'pending' AND published_unix < ?)
+                  OR (status != 'playing' AND duration > ?)""",
+            (cutoff, max_duration_sec),
         )
         rows = [
             dict(row) for row in await cursor.fetchall()
@@ -245,8 +272,9 @@ async def purge_expired() -> int:
                       AND (
                         status = 'expired'
                         OR (status = 'pending' AND published_unix < ?)
+                        OR (status != 'playing' AND duration > ?)
                       )""",
-                [row["video_id"] for row in rows] + [cutoff],
+                [row["video_id"] for row in rows] + [cutoff, max_duration_sec],
             )
             await db.commit()
     doomed: list[Path] = []
@@ -269,9 +297,12 @@ async def discard_video_files(video_id: str, local_path: str = "") -> None:
 
 
 def _downloadable(row: dict) -> bool:
-    if row.get("status") not in _KEEP_STATUSES:
+    if row.get("status") not in ("playing", "pending", "played"):
         return False
-    if row.get("status") == "pending" and int(row.get("published_unix") or 0) < int(time.time()) - 86400:
+    if int(row.get("published_unix") or 0) < int(time.time()) - 86400:
+        return False
+    max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
+    if int(row.get("duration") or 0) > max_duration_sec:
         return False
     return True
 
@@ -279,7 +310,7 @@ def _downloadable(row: dict) -> bool:
 async def _one_row(video_id: str) -> dict | None:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT video_id, status, published_unix, local_path FROM queue WHERE video_id = ?",
+            "SELECT video_id, status, published_unix, local_path, duration FROM queue WHERE video_id = ?",
             (video_id,),
         )
         row = await cursor.fetchone()
@@ -615,7 +646,7 @@ async def discard_all_downloads() -> None:
 async def _queue_rows() -> list[dict]:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT id, video_id, status, published_unix, local_path, play_order FROM queue"
+            "SELECT id, video_id, status, published_unix, local_path, play_order, duration FROM queue"
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -655,3 +686,15 @@ async def _store_error(video_id: str, message: str) -> None:
             (message, video_id),
         )
         await db.commit()
+
+
+async def reset_video_error(queue_id: int) -> bool:
+    """Clear download error for a video so sync will try again."""
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE queue SET download_error = '' WHERE id = ?",
+            (queue_id,),
+        )
+        await db.commit()
+    schedule_sync()
+    return True

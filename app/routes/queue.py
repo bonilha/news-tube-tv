@@ -38,6 +38,7 @@ async def _queue_ctx(extra: dict | None = None) -> dict:
     ctx = {
         "encoder": queue_download.selected_encoder_label(),
         "download_keep": settings.QUEUE_DOWNLOAD_KEEP,
+        "max_duration_minutes": settings.QUEUE_MAX_DURATION_MINUTES,
         **await cycle_manager.marks_for(extra.get("items") or []),
     }
     if extra:
@@ -129,6 +130,16 @@ async def expire_old(request: Request, _auth: bool = Depends(verify_credentials)
         "scan_stats": stats,
         "expired_count": stats["expired"],
     }))
+
+
+@router.post("/queue/{item_id}/retry", response_class=HTMLResponse)
+async def retry_download(
+    request: Request, item_id: int,
+    _auth: bool = Depends(verify_credentials),
+):
+    await queue_download.reset_video_error(item_id)
+    items = await queue_svc.get_queue_full()
+    return _html(request, "partials/queue_table.html", await _queue_ctx({"items": items}))
 
 
 # ---------------------------------------------------------------------------

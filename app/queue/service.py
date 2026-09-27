@@ -186,6 +186,28 @@ async def mark_status(queue_id: int, status: str) -> bool:
     return True
 
 
+async def mark_status_by_video_id(video_id: str, status: str) -> bool:
+    """Update queue item status by video_id."""
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE queue SET status = ? WHERE video_id = ?",
+            (status, video_id),
+        )
+        await db.commit()
+    return True
+
+
+async def reset_played_to_pending() -> int:
+    """Reset played videos back to pending for the next cycle round."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "UPDATE queue SET status = 'pending' WHERE status = 'played'"
+        )
+        count = cursor.rowcount
+        await db.commit()
+    return count
+
+
 async def clear_queue_and_rescan() -> dict:
     """Delete every queue row and its files, then scan the channels again."""
     async with get_db() as db:
