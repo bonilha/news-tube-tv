@@ -5,6 +5,7 @@ import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from app.database import get_db
 from app.queue import download as queue_download
@@ -71,6 +72,8 @@ async def _scan_channel(
     now = int(time.time())
 
     async with get_db() as db:
+        cursor = await db.execute("SELECT COALESCE(MAX(play_order), 0) FROM queue")
+        next_order = int((await cursor.fetchone())[0] or 0)
         for raw in videos:
             meta = invidious.normalize_video(raw)
             eligible, reason = invidious.is_eligible(
@@ -82,10 +85,11 @@ async def _scan_channel(
             meta["title"] = await invidious.video_title(meta["video_id"], meta["title"])
 
             try:
+                play_order = next_order + 1 if next_order > 0 else 0
                 cursor = await db.execute(
                     """INSERT OR IGNORE INTO queue
-                       (channel_id, video_id, title, author, duration, published_unix, thumb)
-                       SELECT id, ?, ?, ?, ?, ?, ?
+                       (channel_id, video_id, title, author, duration, published_unix, thumb, play_order)
+                       SELECT id, ?, ?, ?, ?, ?, ?, ?
                        FROM channels WHERE channel_id = ?
                        LIMIT 1""",
                     (
@@ -95,9 +99,12 @@ async def _scan_channel(
                         meta["duracao"],
                         meta["published"] or 0,
                         meta["thumb"],
+                        play_order,
                         channel_id,
                     ),
                 )
+                if cursor.rowcount:
+                    next_order = play_order
                 inserted = bool(cursor.rowcount)
                 # Refresh title and thumb on videos already queued.
                 await db.execute(
@@ -188,7 +195,7 @@ async def clear_queue_and_rescan() -> dict:
         await db.commit()
     queue_download.protect_video_ids(set())
     for row in rows:
-        queue_download.discard_video_files(row["video_id"], row["local_path"] or "")
+        await queue_download.discard_video_files(row["video_id"], row["local_path"] or "")
     stats = await maintain_queue()
     stats["cleared"] = len(rows)
     return stats
@@ -278,20 +285,118 @@ async def expire_old_videos() -> int:
     return await queue_download.purge_expired()
 
 
-async def shuffle_play_order() -> int:
-    """Shuffle play_order for all queue items. Returns count of items shuffled."""
+def has_video_file(row: dict) -> bool:
+    path = row.get("local_path") or ""
+    return bool(path) and Path(path).is_file()
+
+
+async def first_broadcast_row() -> dict | None:
+    """First pending item in the queue the broadcast must play."""
+    for row in await get_queue_full():
+        if row.get("status") in ("pending", "playing"):
+            return row
+    return None
+
+
+async def broadcast_ready() -> bool:
+    """True when some queued video already has an MP4 the cycle can play."""
+    for row in await get_queue_full():
+        if has_video_file(row):
+            return True
+    return False
+
+
+async def startup_broadcast_queue() -> dict[str, int]:
+    """Scan, shuffle once, drop leftover MP4s, then download the new order."""
+    stats = await scan_all_channels()
+    stats["expired"] = await expire_old_videos()
+    stats["shuffled"] = await shuffle_play_order(reset_files=True)
+    return stats
+
+
+def spread_play_order(rows: list[tuple[int, int]]) -> list[int]:
+    """Queue ids with the same channel kept apart when the counts allow it.
+
+    No two from one channel sit together when that is possible. When one
+    channel has too many videos, the extras are spread so a run stays as
+    short as the rest of the queue allows.
+    """
     import random
-    async with get_db() as db:
-        cursor = await db.execute("SELECT id FROM queue")
-        rows = await cursor.fetchall()
-        ids = [row["id"] for row in rows]
-        if not ids:
-            return 0
+
+    by_channel: dict[int, list[int]] = {}
+    for queue_id, channel_id in rows:
+        by_channel.setdefault(channel_id, []).append(queue_id)
+    for ids in by_channel.values():
         random.shuffle(ids)
-        for i, queue_id in enumerate(ids, 1):
-            await db.execute("UPDATE queue SET play_order = ? WHERE id = ?", (i, queue_id))
+
+    remaining = {channel_id: len(ids) for channel_id, ids in by_channel.items()}
+    sequence: list[int] = []
+    while sum(remaining.values()):
+        last = sequence[-1] if sequence else None
+        choices = [channel_id for channel_id, count in remaining.items() if count and channel_id != last]
+        if not choices:
+            break
+        most = max(remaining[channel_id] for channel_id in choices)
+        tied = [channel_id for channel_id in choices if remaining[channel_id] == most]
+        pick = random.choice(tied)
+        sequence.append(pick)
+        remaining[pick] -= 1
+
+    leftover = next((channel_id for channel_id, count in remaining.items() if count), None)
+    if leftover is not None:
+        sequence = _insert_channel(sequence, leftover, remaining[leftover])
+
+    ordered: list[int] = []
+    for channel_id in sequence:
+        ordered.append(by_channel[channel_id].pop())
+    return ordered
+
+
+def _run_after_insert(sequence: list[int], index: int, channel_id: int) -> int:
+    left = 0
+    cursor = index - 1
+    while cursor >= 0 and sequence[cursor] == channel_id:
+        left += 1
+        cursor -= 1
+    right = 0
+    cursor = index
+    while cursor < len(sequence) and sequence[cursor] == channel_id:
+        right += 1
+        cursor += 1
+    return left + 1 + right
+
+
+def _insert_channel(sequence: list[int], channel_id: int, extra: int) -> list[int]:
+    """Place leftover videos of one channel into the gaps that form the shortest run."""
+    import random
+
+    result = list(sequence)
+    for _ in range(extra):
+        scored = [
+            (_run_after_insert(result, index, channel_id), index)
+            for index in range(len(result) + 1)
+        ]
+        shortest = min(score for score, _index in scored)
+        chosen = random.choice([index for score, index in scored if score == shortest])
+        result.insert(chosen, channel_id)
+    return result
+
+
+async def shuffle_play_order(*, reset_files: bool = False) -> int:
+    """Shuffle play_order for all queue items. Returns count of items shuffled."""
+    async with get_db() as db:
+        cursor = await db.execute("SELECT id, channel_id FROM queue")
+        rows = [(row["id"], row["channel_id"]) for row in await cursor.fetchall()]
+        if not rows:
+            return 0
+        ordered = spread_play_order(rows)
+        for position, queue_id in enumerate(ordered, 1):
+            await db.execute("UPDATE queue SET play_order = ? WHERE id = ?", (position, queue_id))
         await db.commit()
-        return len(ids)
+    if reset_files:
+        await queue_download.discard_all_downloads()
+        queue_download.schedule_sync()
+    return len(rows)
 
 
 

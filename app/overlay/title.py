@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ctypes
+import unicodedata
 from ctypes import wintypes
 
 _ELLIPSIS = "…"
@@ -65,9 +66,24 @@ def _approx_width(size: int, bold: bool, text: str) -> int:
     return int(len(text) * max(1, size) * factor)
 
 
+def strip_drawings(text: str) -> str:
+    """Drop emoji and other pictographs. Letters, accents, and punctuation stay."""
+    kept: list[str] = []
+    for char in text or "":
+        if char in "\u200d\ufe0e\ufe0f":
+            continue
+        if "\U000e0020" <= char <= "\U000e007f":
+            continue
+        category = unicodedata.category(char)
+        if category in {"So", "Sk", "Co"}:
+            continue
+        kept.append(char)
+    return "".join(kept)
+
+
 def fit_line(text: str, face: str, size: int, bold: bool, max_px: float) -> str:
     """One line. A title that fits is unchanged. A longer one is cut and ends with …."""
-    single = " ".join((text or "").split())
+    single = " ".join(strip_drawings(text).split())
     if not single or max_px <= 0:
         return single
     if text_width(face, size, bold, single) <= max_px:

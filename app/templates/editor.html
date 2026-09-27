@@ -35,10 +35,11 @@
                             onclick="showAddSources()">
                         + Add
                     </button>
-                    <button class="btn btn-success" style="font-size:0.8rem;padding:0.3rem 0.6rem;margin-left:0.25rem"
+                    <button class="btn btn-success" id="queue-player-btn" style="font-size:0.8rem;padding:0.3rem 0.6rem;margin-left:0.25rem"
                             hx-post="/api/cycle/enable" hx-swap="none"
-                            hx-on:after-request="onQueuePlayer(event)">
-                        ▶ Queue Player
+                            hx-on:after-request="onQueuePlayer(event)"
+                            disabled title="O primeiro vídeo da fila ainda está sendo baixado.">
+                        ▶ Simulação
                     </button>
                 </div>
             </div>
@@ -202,6 +203,19 @@
 <script>
 window._editorScene = null;
 window._editorItemId = null;
+
+async function refreshQueuePlayerButton() {
+    var button = document.getElementById('queue-player-btn');
+    if (!button) return;
+    try {
+        var resp = await fetch('/api/cycle/status');
+        if (!resp.ok) return;
+        var data = await resp.json();
+        button.disabled = !data.queue_ready;
+    } catch (e) { /* next poll */ }
+}
+refreshQueuePlayerButton();
+setInterval(refreshQueuePlayerButton, 3000);
 
 window.onQueuePlayer = function(event) {
     var xhr = event.detail && event.detail.xhr;

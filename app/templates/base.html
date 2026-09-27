@@ -65,6 +65,7 @@
             transition: opacity 0.15s;
         }
         .btn:active { opacity: 0.8; }
+        .btn:disabled { opacity: 0.45; cursor: not-allowed; }
         .btn-primary { background: var(--accent-color); color: #fff; }
         .btn-danger { background: var(--danger-color); color: #fff; }
         .btn-success { background: var(--success-color); color: #fff; }
@@ -140,29 +141,24 @@
     </div>
     <aside>
         <div class="brand">NewsTube TV</div>
-        <a href="/" class="nav-item active" id="nav-dashboard"
-           hx-get="/" hx-target="#content" hx-push-url="true"
-           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-dashboard').classList.add('active')">
+        <a href="/" class="nav-item{% if request.url.path == '/' %} active{% endif %}" id="nav-dashboard"
+           hx-get="/" hx-target="#content" hx-push-url="true">
             Dashboard
         </a>
-        <a href="/scenes" class="nav-item" id="nav-scenes"
-           hx-get="/scenes" hx-target="#content" hx-push-url="true"
-           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-scenes').classList.add('active')">
+        <a href="/scenes" class="nav-item{% if request.url.path == '/scenes' %} active{% endif %}" id="nav-scenes"
+           hx-get="/scenes" hx-target="#content" hx-push-url="true">
             Scenes
         </a>
-        <a href="/assets" class="nav-item" id="nav-assets"
-           hx-get="/assets" hx-target="#content" hx-push-url="true"
-           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-assets').classList.add('active')">
+        <a href="/assets" class="nav-item{% if request.url.path == '/assets' %} active{% endif %}" id="nav-assets"
+           hx-get="/assets" hx-target="#content" hx-push-url="true">
             Assets
         </a>
-        <a href="/channels" class="nav-item" id="nav-channels"
-           hx-get="/channels" hx-target="#content" hx-push-url="true"
-           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-channels').classList.add('active')">
+        <a href="/channels" class="nav-item{% if request.url.path == '/channels' %} active{% endif %}" id="nav-channels"
+           hx-get="/channels" hx-target="#content" hx-push-url="true">
             Channels
         </a>
-        <a href="/queue" class="nav-item" id="nav-queue"
-           hx-get="/queue" hx-target="#content" hx-push-url="true"
-           hx-on:after-request="document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));document.getElementById('nav-queue').classList.add('active')">
+        <a href="/queue" class="nav-item{% if request.url.path == '/queue' %} active{% endif %}" id="nav-queue"
+           hx-get="/queue" hx-target="#content" hx-push-url="true">
             Queue
         </a>
 
@@ -171,6 +167,22 @@
         {% block content %}{% endblock %}
     </main>
     <script>
+    document.body.addEventListener("htmx:configRequest", function (evt) {
+        evt.detail.credentials = "include";
+    });
+    function markNav(path) {
+        document.querySelectorAll("a.nav-item").forEach(function (link) {
+            link.classList.toggle("active", link.getAttribute("href") === path);
+        });
+    }
+    document.body.addEventListener("click", function (evt) {
+        var link = evt.target.closest && evt.target.closest("a.nav-item");
+        if (!link) return;
+        markNav(link.getAttribute("href"));
+    });
+    document.body.addEventListener("htmx:pushedIntoHistory", function () {
+        markNav(location.pathname);
+    });
     (function () {
         var box = document.getElementById("cookie-alert");
         var text = document.getElementById("cookie-alert-text");

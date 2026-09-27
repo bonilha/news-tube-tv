@@ -1,3 +1,29 @@
+<div class="flex gap-1 mb-3">
+    <button class="btn btn-success" hx-post="/api/streaming/start" hx-swap="none"
+            hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')"
+            {% if not queue_ready %}disabled title="Ainda não há um MP4 na fila para tocar."{% endif %}>
+        Transmissão ao vivo
+    </button>
+    <button class="btn btn-danger" hx-post="/api/streaming/stop" hx-swap="none"
+            hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')"
+            {% if not queue_ready and not status.is_streaming %}disabled title="Ainda não há um MP4 na fila para tocar."{% endif %}>
+        Parar transmissão
+    </button>
+    <button class="btn btn-success" hx-post="/api/cycle/enable" hx-swap="none"
+            hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')"
+            {% if not queue_ready %}disabled title="Ainda não há um MP4 na fila para tocar."{% endif %}>
+        Simulação
+    </button>
+    <button class="btn btn-danger" hx-post="/api/cycle/disable" hx-swap="none"
+            hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')"
+            {% if not queue_ready and not cycle.enabled %}disabled title="Ainda não há um MP4 na fila para tocar."{% endif %}>
+        Parar simulação
+    </button>
+</div>
+{% if not queue_ready %}
+<p class="text-sm text-muted mb-2">Ao vivo e simulação ficam bloqueados até haver um MP4 na fila. Parar continua disponível se essa transmissão ou simulação já estiver ligada.</p>
+{% endif %}
+
 <div class="grid grid-2 mb-3">
     <div class="card">
         <h3>Streaming</h3>

@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     # How often to scan channels and expire queued videos. 0 disables the loop.
     QUEUE_REFRESH_MINUTES: int = 15
 
+    # How often to top up the on-disk MP4 buffer. 0 disables only this loop.
+    QUEUE_BUFFER_MINUTES: int = 5
+
     # Browser cookie export used by yt-dlp. Downloads do not run unless it passes.
     COOKIES_DIR: Path = Path("cookies")
 

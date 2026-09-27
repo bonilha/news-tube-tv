@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from app.auth import verify_credentials
 from app.cycle import cycle_manager
 from app.obs.manager import obs_manager, ALL_SCENES, SCENE_DESCRIPTIONS
+from app.queue import service as queue_svc
 
 router = APIRouter(tags=["dashboard"])
 templates = Jinja2Templates(directory="app/templates")
@@ -77,6 +78,7 @@ async def dashboard_live(request: Request, _auth: bool = Depends(verify_credenti
     return _html(request, "partials/dashboard_live.html", {
         "status": status,
         "cycle": cycle_manager.status_dict(),
+        "queue_ready": await queue_svc.broadcast_ready(),
     })
 
 
@@ -109,7 +111,9 @@ async def api_stop_streaming(_auth: bool = Depends(verify_credentials)):
 
 @router.get("/api/cycle/status", response_class=JSONResponse)
 async def api_cycle_status(_auth: bool = Depends(verify_credentials)):
-    return JSONResponse(cycle_manager.status_dict())
+    payload = cycle_manager.status_dict()
+    payload["queue_ready"] = await queue_svc.broadcast_ready()
+    return JSONResponse(payload)
 
 
 @router.post("/api/cycle/enable", response_class=JSONResponse)

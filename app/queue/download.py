@@ -32,12 +32,34 @@ _dirty = False
 
 _KEEP_STATUSES = ("playing", "pending")
 _protected_ids: set[str] = set()
+_hold_player_release = False
+# Already shown this pass, plus the one on air. They do not take a download slot.
+_skip_keep: set[str] = set()
+_stuck_deletes: set[str] = set()
+_PLAYER_SOURCE = "NewsTube Fila"
+_MEDIA_STOP = "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP"
 
 
 def protect_video_ids(video_ids: set[str]) -> None:
     """Video ids the live pass still needs. Sync will not delete their files."""
     global _protected_ids
     _protected_ids = set(video_ids)
+
+
+def hold_player_release(hold: bool) -> None:
+    """While the cycle waits on the bumper, do not stop NewsTube Fila."""
+    global _hold_player_release
+    _hold_player_release = hold
+
+
+def skip_keep_ids(video_ids: set[str]) -> None:
+    """Ids that must not occupy one of the QUEUE_DOWNLOAD_KEEP slots.
+
+    The file of an id that is also protected is kept. An id that is only
+    skipped (already aired) is deleted on the next sync.
+    """
+    global _skip_keep
+    _skip_keep = set(video_ids)
 
 
 def selected_encoder() -> str | None:
@@ -85,17 +107,46 @@ def _encoder_works(name: str, args: tuple[str, ...]) -> bool:
     return True
 
 
-def keep_ids(rows: list[dict], limit: int) -> list[str]:
-    """Playing first, then the oldest pending. At most `limit` video ids."""
+def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list[str]:
+    """Next `limit` video ids that are still unplayed.
+
+    After a shuffle, play_order is the queue. Before that, playing comes
+    first and then the oldest pending. Ids in `skip` (already aired this
+    pass, or the one on air) do not consume a slot.
+    """
     if limit <= 0:
         return []
-    eligible = [row for row in rows if row.get("status") in _KEEP_STATUSES]
-    eligible.sort(key=lambda row: (
-        0 if row.get("status") == "playing" else 1,
-        int(row.get("published_unix") or 0),
-        int(row.get("id") or 0),
-    ))
+    skipped = skip or set()
+    eligible = [
+        row for row in rows
+        if row.get("status") in _KEEP_STATUSES and row.get("video_id") not in skipped
+    ]
+    shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
+    if shuffled:
+        eligible.sort(key=lambda row: (
+            int(row.get("play_order") or 0),
+            int(row.get("id") or 0),
+        ))
+    else:
+        eligible.sort(key=lambda row: (
+            0 if row.get("status") == "playing" else 1,
+            int(row.get("published_unix") or 0),
+            int(row.get("id") or 0),
+        ))
     return [row["video_id"] for row in eligible[:limit]]
+
+
+def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list[str]:
+    """Unplayed ids first, then already aired ones if the queue is running out.
+
+    The player keeps a file for what is still ahead. Aired videos fill the
+    rest of the window so the next pass can download before the current one ends.
+    """
+    fresh = keep_ids(rows, limit, skip)
+    if len(fresh) >= limit:
+        return fresh
+    more = keep_ids(rows, limit - len(fresh), set(fresh))
+    return fresh + [video_id for video_id in more if video_id not in fresh]
 
 
 def files_outside_keep(directory: Path, keep: set[str]) -> list[Path]:
@@ -169,8 +220,12 @@ async def _sync_loop() -> None:
 
 
 async def purge_expired() -> int:
-    """Delete expired rows and pending videos older than 24h, plus their files."""
+    """Delete expired rows and pending videos older than 24h, plus their files.
+
+    Ids still needed by the live pass stay in the queue until that pass ends.
+    """
     cutoff = int(time.time()) - 86400
+    protected = set(_protected_ids)
     async with get_db() as db:
         cursor = await db.execute(
             """SELECT video_id, local_path FROM queue
@@ -178,28 +233,39 @@ async def purge_expired() -> int:
                   OR (status = 'pending' AND published_unix < ?)""",
             (cutoff,),
         )
-        rows = [dict(row) for row in await cursor.fetchall()]
-        await db.execute(
-            """DELETE FROM queue
-               WHERE status = 'expired'
-                  OR (status = 'pending' AND published_unix < ?)""",
-            (cutoff,),
-        )
-        await db.commit()
+        rows = [
+            dict(row) for row in await cursor.fetchall()
+            if row["video_id"] not in protected
+        ]
+        if rows:
+            placeholders = ",".join("?" * len(rows))
+            await db.execute(
+                f"""DELETE FROM queue
+                    WHERE video_id IN ({placeholders})
+                      AND (
+                        status = 'expired'
+                        OR (status = 'pending' AND published_unix < ?)
+                      )""",
+                [row["video_id"] for row in rows] + [cutoff],
+            )
+            await db.commit()
+    doomed: list[Path] = []
     for row in rows:
-        _delete_paths(_leftovers(row["video_id"]))
+        doomed.extend(_leftovers(row["video_id"]))
         if row["local_path"]:
-            _delete_paths([Path(row["local_path"])])
+            doomed.append(Path(row["local_path"]))
+    await remove_files(doomed)
     if rows:
         log.info("Removed %d expired queue videos and their files", len(rows))
     return len(rows)
 
 
-def discard_video_files(video_id: str, local_path: str = "") -> None:
+async def discard_video_files(video_id: str, local_path: str = "") -> None:
     """Delete every file on disk that belongs to this video."""
-    _delete_paths(_leftovers(video_id))
+    paths = _leftovers(video_id)
     if local_path:
-        _delete_paths([Path(local_path)])
+        paths.append(Path(local_path))
+    await remove_files(paths)
 
 
 def _downloadable(row: dict) -> bool:
@@ -225,10 +291,8 @@ async def sync_downloads() -> None:
     settings.VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
     await purge_expired()
     rows = await _queue_rows()
-    keep = keep_ids(rows, settings.QUEUE_DOWNLOAD_KEEP)
+    keep = buffer_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep)
     keep_set = set(keep) | set(_protected_ids)
-    await _forget_paths_outside(keep_set)
-    _delete_paths(files_outside_keep(settings.VIDEOS_DIR, keep_set))
 
     if not _encoder:
         log.warning("Skipping downloads: no H.264 encoder")
@@ -242,7 +306,7 @@ async def sync_downloads() -> None:
         final = settings.VIDEOS_DIR / f"{video_id}.mp4"
         current = await _one_row(video_id)
         if current is None or not _downloadable(current):
-            _delete_paths(_leftovers(video_id))
+            await remove_files(_leftovers(video_id))
             continue
         if final.exists() and final.stat().st_size > 0:
             await _store_path(video_id, final)
@@ -264,23 +328,34 @@ async def sync_downloads() -> None:
                     "Atualize o arquivo em cookies. Os vídeos não serão baixados."
                 )
                 await _store_error(video_id, "Cookies do YouTube recusados")
-                _delete_paths(_leftovers(video_id))
+                await remove_files(_leftovers(video_id))
                 return
             await _store_error(video_id, text[:300])
-            _delete_paths(_leftovers(video_id))
+            await remove_files(_leftovers(video_id))
             continue
         current = await _one_row(video_id)
         if current is None or not _downloadable(current):
-            _delete_paths(_leftovers(video_id))
+            await remove_files(_leftovers(video_id))
             continue
         if final.exists() and final.stat().st_size > 0:
             await _store_path(video_id, final)
-            _delete_paths([
+            await remove_files([
                 path for path in _leftovers(video_id) if path != final
             ])
         else:
             await _store_error(video_id, "yt-dlp did not produce an MP4")
         by_id.pop(video_id, None)
+
+    ready = 0
+    for video_id in keep:
+        final = settings.VIDEOS_DIR / f"{video_id}.mp4"
+        if final.exists() and final.stat().st_size > 0:
+            ready += 1
+    if keep and ready < len(keep):
+        log.info("Keeping extra MP4s until %d of %d buffer files exist", ready, len(keep))
+        return
+    await _forget_paths_outside(keep_set)
+    await remove_files(files_outside_keep(settings.VIDEOS_DIR, keep_set))
 
 
 def _codecs(path: Path) -> tuple[str, str]:
@@ -308,6 +383,40 @@ def _codecs(path: Path) -> tuple[str, str]:
     return video, audio
 
 
+def _video_size(path: Path) -> tuple[int, int]:
+    """Pixel size of the first video stream. (0, 0) when ffprobe cannot tell."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=width,height",
+        "-of", "csv=p=0:s=x",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log.warning("ffprobe size failed for %s: %s", path.name, exc)
+        return 0, 0
+    line = (result.stdout or "").strip().splitlines()
+    if not line or "x" not in line[0]:
+        return 0, 0
+    width_text, _, height_text = line[0].partition("x")
+    try:
+        return int(width_text), int(height_text)
+    except ValueError:
+        return 0, 0
+
+
+def _scale_filter() -> str:
+    """Fit inside the OBS canvas and pad so the file is exactly that size."""
+    width = settings.OBS_BASE_WIDTH
+    height = settings.OBS_BASE_HEIGHT
+    return (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,setsar=1"
+    )
+
+
 def _enough_free_space() -> bool:
     try:
         free = shutil.disk_usage(settings.VIDEOS_DIR).free
@@ -328,12 +437,69 @@ def _leftovers(video_id: str) -> list[Path]:
     ]
 
 
-def _delete_paths(paths: list[Path]) -> None:
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return os.path.normcase(str(left)) == os.path.normcase(str(right))
+
+
+async def _release_obs_file(paths: list[Path]) -> None:
+    """Stop NewsTube Fila when it still has one of these files open."""
+    from app.obs.manager import obs_manager
+
+    if _hold_player_release:
+        return
+    info = await obs_manager.get_input_settings(_PLAYER_SOURCE)
+    local = str((info.get("inputSettings") or {}).get("local_file") or "")
+    if not local:
+        return
+    current = Path(local)
+    if not any(_same_file(current, path) for path in paths):
+        return
+    if current.name.split(".", 1)[0] in _protected_ids:
+        return
+    await obs_manager.trigger_media(_PLAYER_SOURCE, _MEDIA_STOP)
+    await obs_manager.set_input_settings(_PLAYER_SOURCE, {
+        "is_local_file": True,
+        "local_file": "",
+        "close_when_inactive": True,
+        "looping": False,
+    })
+    await asyncio.sleep(0.4)
+
+
+async def remove_files(paths: list[Path]) -> None:
+    """Delete files. If OBS still holds one, close that source and retry once."""
+    unique: list[Path] = []
+    seen: set[str] = set()
     for path in paths:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            log.warning("Could not delete %s", path)
+        key = os.path.normcase(str(path))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    if not unique:
+        return
+    failed = [path for path in unique if not _try_unlink(path)]
+    if not failed:
+        return
+    await _release_obs_file(failed)
+    for path in failed:
+        _try_unlink(path, locked_message=True)
+
+
+def _try_unlink(path: Path, *, locked_message: bool = False) -> bool:
+    key = os.path.normcase(str(path))
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        if locked_message and key not in _stuck_deletes:
+            log.warning("Arquivo em uso, nova tentativa no próximo ciclo: %s", path)
+            _stuck_deletes.add(key)
+        return False
+    _stuck_deletes.discard(key)
+    return True
 
 
 def _download_mp4(video_id: str) -> None:
@@ -348,18 +514,36 @@ def _download_mp4(video_id: str) -> None:
             source = Path(info["filepath"])
             final = settings.VIDEOS_DIR / f"{video_id}.mp4"
             video_codec, audio_codec = _codecs(source)
+            width, height = _video_size(source)
+            target = (settings.OBS_BASE_WIDTH, settings.OBS_BASE_HEIGHT)
+            needs_scale = width > 0 and height > 0 and (width, height) != target
             log.info(
-                "Downloaded %s video=%s audio=%s container=%s",
+                "Downloaded %s video=%s audio=%s container=%s size=%sx%s",
                 video_id, video_codec or "?", audio_codec or "?", source.suffix,
+                width or "?", height or "?",
             )
-            if video_codec == "h264" and audio_codec == "aac" and source.suffix.lower() == ".mp4":
-                log.info("Already H.264 + AAC in MP4, no encode: %s", video_id)
+            if (
+                not needs_scale
+                and video_codec == "h264"
+                and audio_codec == "aac"
+                and source.suffix.lower() == ".mp4"
+            ):
+                log.info("Already H.264 + AAC in MP4 at %sx%s, no encode: %s", *target, video_id)
                 if source.resolve() != final.resolve():
                     source.replace(final)
                 info["filepath"] = str(final)
                 info["ext"] = "mp4"
                 return [], info
-            if video_codec in {"", "h264"} and audio_codec in {"", "aac"}:
+            if needs_scale:
+                if not _encoder:
+                    raise PostProcessingError("no H.264 encoder to scale to Full HD")
+                log.info(
+                    "Scale %sx%s to %sx%s: %s",
+                    width, height, target[0], target[1], video_id,
+                )
+                audio = ["-c:a", "copy"] if audio_codec == "aac" else ["-c:a", "aac", "-b:a", "160k"]
+                args = ["-vf", _scale_filter(), "-c:v", _encoder, *_encoder_args, *audio]
+            elif video_codec in {"", "h264"} and audio_codec in {"", "aac"}:
                 log.info("Remux only: %s", video_id)
                 args = ["-c", "copy"]
             elif video_codec == "h264":
@@ -411,10 +595,27 @@ def _download_mp4(video_id: str) -> None:
         ydl.download([url])
 
 
+async def discard_all_downloads() -> None:
+    """Delete every queued MP4 and forget the stored paths."""
+    protect_video_ids(set())
+    async with get_db() as db:
+        cursor = await db.execute("SELECT video_id, local_path FROM queue")
+        rows = [dict(row) for row in await cursor.fetchall()]
+        await db.execute("UPDATE queue SET local_path = '', download_error = ''")
+        await db.commit()
+    doomed: list[Path] = []
+    for row in rows:
+        doomed.extend(_leftovers(row["video_id"]))
+        if row["local_path"]:
+            doomed.append(Path(row["local_path"]))
+    doomed.extend(files_outside_keep(settings.VIDEOS_DIR, set()))
+    await remove_files(doomed)
+
+
 async def _queue_rows() -> list[dict]:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT id, video_id, status, published_unix, local_path FROM queue"
+            "SELECT id, video_id, status, published_unix, local_path, play_order FROM queue"
         )
         return [dict(row) for row in await cursor.fetchall()]
 
@@ -430,7 +631,7 @@ async def _forget_paths_outside(keep: set[str]) -> None:
                 continue
             path = Path(row["local_path"]) if row["local_path"] else None
             if path is not None:
-                _delete_paths([path])
+                await remove_files([path])
             await db.execute(
                 "UPDATE queue SET local_path = '', download_error = '' WHERE video_id = ?",
                 (row["video_id"],),
