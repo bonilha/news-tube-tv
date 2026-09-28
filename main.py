@@ -8,6 +8,7 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
@@ -122,6 +123,11 @@ def _basic_credentials(request: Request):
     if not sep:
         return None
     return HTTPBasicCredentials(username=user, password=password)
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse(Path("static/favicon.ico"), media_type="image/x-icon")
+
 
 # Static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
