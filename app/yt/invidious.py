@@ -108,17 +108,35 @@ async def get_channel(ucid: str) -> dict[str, Any]:
     return await _get(f"/channels/{quote(ucid, safe='')}")
 
 
-async def video_title(video_id: str, fallback: str) -> str:
-    """Title from the video endpoint, which honors hl. The channel list does not."""
+def stream_max_height(data: dict[str, Any]) -> int:
+    """Tallest listed stream. Zero when the payload has no heights."""
+    heights: list[int] = []
+    for key in ("adaptiveFormats", "formatStreams"):
+        for item in data.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                heights.append(int(item.get("height") or 0))
+            except (TypeError, ValueError):
+                continue
+    return max(heights) if heights else 0
+
+
+async def video_title(video_id: str, fallback: str) -> tuple[str, int]:
+    """Title and max stream height from the video endpoint, which honors hl.
+
+    The channel list does not. Height is 0 when the request fails or lists none.
+    """
     if not video_id:
-        return fallback
+        return fallback, 0
     try:
         data = await _get(f"/videos/{video_id}")
     except InvidiousError:
-        return fallback
+        return fallback, 0
     if not isinstance(data, dict):
-        return fallback
-    return (data.get("title") or "").strip() or fallback
+        return fallback, 0
+    title = (data.get("title") or "").strip() or fallback
+    return title, stream_max_height(data)
 
 
 async def channel_videos(ucid: str, sort_by: str = "newest") -> list[dict[str, Any]]:

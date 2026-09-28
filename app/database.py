@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS queue (
     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     play_order INTEGER NOT NULL DEFAULT 0,
     play_count INTEGER NOT NULL DEFAULT 0,
+    max_height INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
     UNIQUE(video_id)
 );
@@ -80,6 +81,10 @@ async def init_db() -> None:
         if "play_count" not in columns:
             await db.execute(
                 "ALTER TABLE queue ADD COLUMN play_count INTEGER NOT NULL DEFAULT 0"
+            )
+        if "max_height" not in columns:
+            await db.execute(
+                "ALTER TABLE queue ADD COLUMN max_height INTEGER NOT NULL DEFAULT 0"
             )
         await db.commit()
 

@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
+from app.config import settings
 from app.database import get_db
 from app.queue import download as queue_download
 from app.yt import invidious
@@ -82,14 +83,16 @@ async def _scan_channel(
             if not eligible:
                 skipped += 1
                 continue
-            meta["title"] = await invidious.video_title(meta["video_id"], meta["title"])
+            meta["title"], meta["max_height"] = await invidious.video_title(
+                meta["video_id"], meta["title"],
+            )
 
             try:
                 play_order = next_order + 1 if next_order > 0 else 0
                 cursor = await db.execute(
                     """INSERT OR IGNORE INTO queue
-                       (channel_id, video_id, title, author, duration, published_unix, thumb, play_order)
-                       SELECT id, ?, ?, ?, ?, ?, ?, ?
+                       (channel_id, video_id, title, author, duration, published_unix, thumb, play_order, max_height)
+                       SELECT id, ?, ?, ?, ?, ?, ?, ?, ?
                        FROM channels WHERE channel_id = ?
                        LIMIT 1""",
                     (
@@ -100,6 +103,7 @@ async def _scan_channel(
                         meta["published"] or 0,
                         meta["thumb"],
                         play_order,
+                        int(meta.get("max_height") or 0),
                         channel_id,
                     ),
                 )
@@ -108,8 +112,8 @@ async def _scan_channel(
                 inserted = bool(cursor.rowcount)
                 # Refresh title and thumb on videos already queued.
                 await db.execute(
-                    "UPDATE queue SET title = ?, thumb = ? WHERE video_id = ?",
-                    (meta["title"], meta["thumb"], meta["video_id"]),
+                    "UPDATE queue SET title = ?, thumb = ?, max_height = ? WHERE video_id = ?",
+                    (meta["title"], meta["thumb"], int(meta.get("max_height") or 0), meta["video_id"]),
                 )
                 if inserted:
                     added += 1
@@ -367,6 +371,31 @@ async def startup_broadcast_queue() -> dict[str, int]:
     return stats
 
 
+_LOW_RES_HEIGHT = 720
+
+
+def shuffle_ids(rows: list[tuple[int, int, int]], head: int) -> list[int]:
+    """Queue ids with the same channel apart, and low resolution after `head`.
+
+    Each row is (queue id, channel id, max height). A known height of 720 or
+    less follows every taller or unknown video, so the first `head` positions
+    stay clear of it when enough taller videos exist. Each group is spread on
+    its own.
+    """
+    del head  # the split is the whole taller group, which covers the first N
+    low = [
+        (queue_id, channel_id)
+        for queue_id, channel_id, height in rows
+        if 0 < int(height) <= _LOW_RES_HEIGHT
+    ]
+    taller = [
+        (queue_id, channel_id)
+        for queue_id, channel_id, height in rows
+        if not (0 < int(height) <= _LOW_RES_HEIGHT)
+    ]
+    return spread_play_order(taller) + spread_play_order(low)
+
+
 def spread_play_order(rows: list[tuple[int, int]]) -> list[int]:
     """Queue ids with the same channel kept apart when the counts allow it.
 
@@ -438,11 +467,14 @@ def _insert_channel(sequence: list[int], channel_id: int, extra: int) -> list[in
 async def shuffle_play_order(*, reset_files: bool = False) -> int:
     """Shuffle play_order for all queue items. Returns count of items shuffled."""
     async with get_db() as db:
-        cursor = await db.execute("SELECT id, channel_id FROM queue")
-        rows = [(row["id"], row["channel_id"]) for row in await cursor.fetchall()]
+        cursor = await db.execute("SELECT id, channel_id, max_height FROM queue")
+        rows = [
+            (row["id"], row["channel_id"], int(row["max_height"] or 0))
+            for row in await cursor.fetchall()
+        ]
         if not rows:
             return 0
-        ordered = spread_play_order(rows)
+        ordered = shuffle_ids(rows, settings.QUEUE_DOWNLOAD_KEEP)
         for position, queue_id in enumerate(ordered, 1):
             await db.execute("UPDATE queue SET play_order = ? WHERE id = ?", (position, queue_id))
         await db.commit()
