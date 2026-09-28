@@ -378,16 +378,16 @@ class CycleManager:
                         self._error = True
                         log.info("No MP4 available — stopping cycle")
                         return
+                    # Round-robin: played videos were already rotated to the
+                    # end of the queue.  Just reload from the DB.
                     self._aired = set()
                     self._publish_keep_skip()
-                    await queue_svc.reset_played_to_pending()
-                    await queue_svc.shuffle_play_order(reset_files=False)
                     await self._load_pass()
                     played_any = False
                     if not any(_playable(row) for row in self._pass_items):
                         self._message = _NO_FILE
                         self._error = True
-                        log.info("No MP4 after shuffle — waiting for the buffer")
+                        log.info("No MP4 in refreshed queue — waiting for the buffer")
                         await asyncio.sleep(2)
                     continue
 
@@ -410,7 +410,7 @@ class CycleManager:
                 await self._wait_end(PLAYER_SOURCE)
                 if self._current_id:
                     self._aired.add(self._current_id)
-                    await queue_svc.mark_status_by_video_id(self._current_id, "played")
+                    await queue_svc.rotate_video_to_end(self._current_id)
                 self._current_id = ""
                 self._protect()
                 self._publish_keep_skip()

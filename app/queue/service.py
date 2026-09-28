@@ -142,7 +142,7 @@ async def get_queue(status: str = "pending") -> list[dict]:
         cursor = await db.execute(
             f"""SELECT q.id, q.video_id, q.title, q.author, q.duration,
                       q.published_unix, q.thumb, q.status, q.added_at,
-                      q.local_path, q.download_error, q.play_order,
+                      q.local_path, q.download_error, q.play_order, q.play_count,
                       c.name as channel_name, c.channel_id
                FROM queue q
                JOIN channels c ON c.id = q.channel_id
@@ -159,7 +159,7 @@ async def get_queue_full() -> list[dict]:
         cursor = await db.execute(
             f"""SELECT q.id, q.video_id, q.title, q.author, q.duration,
                       q.published_unix, q.thumb, q.status, q.added_at,
-                      q.local_path, q.download_error, q.play_order,
+                      q.local_path, q.download_error, q.play_order, q.play_count,
                       c.name as channel_name, c.channel_id
                FROM queue q
                JOIN channels c ON c.id = q.channel_id
@@ -177,10 +177,16 @@ def _with_thumb(row) -> dict:
 async def mark_status(queue_id: int, status: str) -> bool:
     """Update queue item status (playing, played, expired)."""
     async with get_db() as db:
-        await db.execute(
-            "UPDATE queue SET status = ? WHERE id = ?",
-            (status, queue_id),
-        )
+        if status == "played":
+            await db.execute(
+                "UPDATE queue SET status = ?, play_count = play_count + 1 WHERE id = ?",
+                (status, queue_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE queue SET status = ? WHERE id = ?",
+                (status, queue_id),
+            )
         await db.commit()
     queue_download.schedule_sync()
     return True
@@ -189,12 +195,37 @@ async def mark_status(queue_id: int, status: str) -> bool:
 async def mark_status_by_video_id(video_id: str, status: str) -> bool:
     """Update queue item status by video_id."""
     async with get_db() as db:
-        await db.execute(
-            "UPDATE queue SET status = ? WHERE video_id = ?",
-            (status, video_id),
-        )
+        if status == "played":
+            await db.execute(
+                "UPDATE queue SET status = ?, play_count = play_count + 1 WHERE video_id = ?",
+                (status, video_id),
+            )
+        else:
+            await db.execute(
+                "UPDATE queue SET status = ? WHERE video_id = ?",
+                (status, video_id),
+            )
         await db.commit()
     return True
+
+
+async def rotate_video_to_end(video_id: str) -> None:
+    """Move a finished video to the end of the play_order queue (round-robin).
+
+    Increments play_count, resets status to 'pending', and assigns the highest
+    play_order so the video goes to the back of the line.
+    """
+    async with get_db() as db:
+        cursor = await db.execute("SELECT COALESCE(MAX(play_order), 0) FROM queue")
+        row = await cursor.fetchone()
+        max_order = row[0] if row else 0
+        await db.execute(
+            "UPDATE queue SET play_order = ?, status = 'pending', play_count = play_count + 1 "
+            "WHERE video_id = ?",
+            (max_order + 1, video_id),
+        )
+        await db.commit()
+    queue_download.schedule_sync()
 
 
 async def reset_played_to_pending() -> int:

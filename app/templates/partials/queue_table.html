@@ -62,8 +62,10 @@
             <td>
                 {% if item.video_id == on_air or item.status == 'playing' %}
                     <span class="status-badge status-on">NO AR</span>
-                {% elif item.video_id in aired or item.status == 'played' %}
-                    <span class="status-badge" style="background:#1e40af; color:#fff;">TRANSMITIDO</span>
+                {% elif item.video_id in aired %}
+                    <span class="status-badge" style="background:#1e40af; color:#fff;">TRANSMITIDO ({{ item.play_count }})</span>
+                {% elif item.play_count > 0 %}
+                    <span class="status-badge" style="background:#1e3a5f; color:#93c5fd;">TRANSMITIDO ({{ item.play_count }})</span>
                 {% elif item.status == 'pending' %}
                     <span class="status-badge" style="background:var(--accent-color); color:#fff;">NA FILA</span>
                 {% else %}
