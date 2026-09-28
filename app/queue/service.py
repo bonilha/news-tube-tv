@@ -253,8 +253,13 @@ async def clear_queue_and_rescan() -> dict:
     queue_download.protect_video_ids(set())
     for row in rows:
         await queue_download.discard_video_files(row["video_id"], row["local_path"] or "")
-    stats = await maintain_queue()
+    stats = await scan_all_channels()
+    stats["expired"] = await expire_old_videos()
     stats["cleared"] = len(rows)
+    # Scan inserts play_order 0, so the table would show oldest-first and a
+    # 720p can lead. Shuffle before the download window is filled.
+    stats["shuffled"] = await shuffle_play_order(reset_files=False)
+    queue_download.schedule_sync()
     return stats
 
 

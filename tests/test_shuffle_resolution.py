@@ -13,6 +13,23 @@ def test_stream_max_height_uses_the_tallest_listed_stream():
     assert stream_max_height({"adaptiveFormats": [{"height": "nope"}]}) == 0
 
 
+def test_stream_max_height_reads_invidious_size():
+    assert stream_max_height({
+        "adaptiveFormats": [
+            {"type": "audio/mp4", "itag": "140"},
+            {"size": "1280x720", "qualityLabel": "720p"},
+            {"size": "1920x1080", "qualityLabel": "1080p"},
+        ],
+    }) == 1080
+    assert stream_max_height({
+        "formatStreams": [{"size": "202x360", "resolution": "360p"}],
+        "adaptiveFormats": [{"size": "1280x720", "qualityLabel": "720p"}],
+    }) == 720
+    assert stream_max_height({
+        "adaptiveFormats": [{"size": "720x1280", "qualityLabel": "720p"}],
+    }) == 720
+
+
 def test_first_window_skips_720_when_taller_videos_fill_it():
     rows = [
         (1, 10, 1080),

@@ -108,18 +108,48 @@ async def get_channel(ucid: str) -> dict[str, Any]:
     return await _get(f"/channels/{quote(ucid, safe='')}")
 
 
-def stream_max_height(data: dict[str, Any]) -> int:
-    """Tallest listed stream. Zero when the payload has no heights."""
-    heights: list[int] = []
-    for key in ("adaptiveFormats", "formatStreams"):
-        for item in data.get(key) or []:
-            if not isinstance(item, dict):
-                continue
+def _listed_quality(item: dict[str, Any]) -> int:
+    """Short side of one stream, which is the 720p/1080p number."""
+    width = height = 0
+    try:
+        width = int(item.get("width") or 0)
+        height = int(item.get("height") or 0)
+    except (TypeError, ValueError):
+        width = height = 0
+    if width <= 0 or height <= 0:
+        size = str(item.get("size") or "")
+        if "x" in size:
+            left, _, right = size.lower().partition("x")
             try:
-                heights.append(int(item.get("height") or 0))
-            except (TypeError, ValueError):
-                continue
-    return max(heights) if heights else 0
+                width, height = int(left), int(right)
+            except ValueError:
+                width = height = 0
+    if width > 0 and height > 0:
+        return min(width, height)
+    if height > 0:
+        return height
+    if width > 0:
+        return width
+    for key in ("qualityLabel", "resolution"):
+        digits = "".join(ch if ch.isdigit() else " " for ch in str(item.get(key) or "")).split()
+        if digits:
+            return int(digits[0])
+    return 0
+
+
+def stream_max_height(data: dict[str, Any]) -> int:
+    """Best listed quality (720, 1080, …). Zero when the payload has none.
+
+    This Invidious build puts the frame in `size` (`1280x720`), not `height`.
+    """
+    qualities = [
+        _listed_quality(item)
+        for key in ("adaptiveFormats", "formatStreams")
+        for item in (data.get(key) or [])
+        if isinstance(item, dict)
+    ]
+    qualities = [value for value in qualities if value > 0]
+    return max(qualities) if qualities else 0
 
 
 async def video_title(video_id: str, fallback: str) -> tuple[str, int]:
