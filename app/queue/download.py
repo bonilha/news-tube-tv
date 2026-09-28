@@ -112,7 +112,9 @@ def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list
 
     After a shuffle, play_order is the queue. Before that, playing comes
     first and then the oldest pending. Ids in `skip` (already aired this
-    pass, or the one on air) do not consume a slot.
+    pass, or the one on air) do not consume a slot. Videos with a
+    download_error are also excluded — they cannot be downloaded until
+    the user retries them manually.
     """
     if limit <= 0:
         return []
@@ -123,6 +125,7 @@ def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list
         if row.get("status") in _KEEP_STATUSES
         and row.get("video_id") not in skipped
         and int(row.get("duration") or 0) <= max_duration_sec
+        and not row.get("download_error")
     ]
     shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
     if shuffled:
@@ -144,6 +147,7 @@ def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> li
 
     The player keeps a file for what is still ahead. Aired videos fill the
     rest of the window so the next pass can download before the current one ends.
+    Videos with download errors are excluded — they cannot fill a buffer slot.
     """
     fresh = keep_ids(rows, limit, skip)
     if len(fresh) >= limit:
@@ -159,6 +163,7 @@ def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> li
         if row.get("status") in ("playing", "pending", "played")
         and row.get("video_id") not in seen
         and int(row.get("duration") or 0) <= max_duration_sec
+        and not row.get("download_error")
     ]
     if shuffled:
         candidates.sort(key=lambda r: (int(r.get("play_order") or 0), int(r.get("id") or 0)))
@@ -382,8 +387,12 @@ async def sync_downloads() -> None:
         final = settings.VIDEOS_DIR / f"{video_id}.mp4"
         if final.exists() and final.stat().st_size > 0:
             ready += 1
-    if keep and ready < len(keep):
-        log.info("Keeping extra MP4s until %d of %d buffer files exist", ready, len(keep))
+    # Only count downloadable (non-errored) ids toward the readiness threshold.
+    # Errored ids are excluded from keep by keep_ids, so this is already guaranteed,
+    # but we guard explicitly for safety.
+    downloadable_keep = len(keep)
+    if keep and ready < downloadable_keep:
+        log.info("Keeping extra MP4s until %d of %d buffer files exist", ready, downloadable_keep)
         return
     await _forget_paths_outside(keep_set)
     await remove_files(files_outside_keep(settings.VIDEOS_DIR, keep_set))
@@ -646,7 +655,7 @@ async def discard_all_downloads() -> None:
 async def _queue_rows() -> list[dict]:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT id, video_id, status, published_unix, local_path, play_order, duration FROM queue"
+            "SELECT id, video_id, status, published_unix, local_path, play_order, duration, download_error FROM queue"
         )
         return [dict(row) for row in await cursor.fetchall()]
 
