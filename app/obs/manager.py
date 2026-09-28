@@ -248,10 +248,64 @@ class OBSManager:
         await self._request("SetCurrentProgramScene", {"sceneName": scene_name})
         self._current_scene = scene_name
 
+    def _request_ok(self, resp: dict | None) -> tuple[bool, str]:
+        status = (resp or {}).get("requestStatus", {})
+        if resp and status.get("result", False):
+            return True, ""
+        return False, status.get("comment") or "OBS recusou a configuração."
+
+    async def _set_profile(self, category: str, name: str, value: str) -> tuple[bool, str]:
+        resp = await self._request("SetProfileParameter", {
+            "parameterCategory": category,
+            "parameterName": name,
+            "parameterValue": value,
+        })
+        return self._request_ok(resp)
+
+    async def apply_stream_settings(self) -> tuple[bool, str]:
+        """Push canvas, bitrate, and simple-output mode. OBS fixes keyint at 2 s."""
+        if settings.OBS_KEYFRAME_SEC != 2:
+            return False, (
+                "OBS_KEYFRAME_SEC precisa ser 2. "
+                "O modo Simple do OBS fixa o keyframe em 2 segundos."
+            )
+        stream_resp = await self._request("GetStreamStatus")
+        if stream_resp and stream_resp.get("responseData", {}).get("outputActive"):
+            return True, ""
+
+        video = await self._request("SetVideoSettings", {
+            "videoSettings": {
+                "baseWidth": settings.OBS_BASE_WIDTH,
+                "baseHeight": settings.OBS_BASE_HEIGHT,
+                "outputWidth": settings.OBS_BASE_WIDTH,
+                "outputHeight": settings.OBS_BASE_HEIGHT,
+                "fpsNumerator": settings.OBS_FPS_NUM,
+                "fpsDenominator": settings.OBS_FPS_DEN,
+            },
+        })
+        ok, comment = self._request_ok(video)
+        if not ok:
+            log.warning("SetVideoSettings failed: %s", comment)
+            return False, comment
+
+        for category, name, value in (
+            ("Output", "Mode", "Simple"),
+            ("SimpleOutput", "VBitrate", str(settings.OBS_STREAM_BITRATE_KBPS)),
+            ("SimpleOutput", "ABitrate", str(settings.OBS_AUDIO_BITRATE_KBPS)),
+        ):
+            ok, comment = await self._set_profile(category, name, value)
+            if not ok:
+                log.warning("SetProfileParameter %s/%s failed: %s", category, name, comment)
+                return False, comment
+        return True, ""
+
     async def start_streaming(self) -> tuple[bool, str]:
         """Write the configured RTMP target into OBS, then start the output."""
         if not self._ws:
             return False, "OBS não está conectado."
+        ready, error = await self.apply_stream_settings()
+        if not ready:
+            return False, error
         service = await self._request("SetStreamServiceSettings", {
             "streamServiceType": "rtmp_custom",
             "streamServiceSettings": {
