@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     OBS_FPS_NUM: int = 30000
     OBS_FPS_DEN: int = 1001
     # Simple-output stream. OBS itself locks the keyframe interval at 2 seconds.
-    OBS_STREAM_BITRATE_KBPS: int = 2500
+    OBS_STREAM_BITRATE_KBPS: int = 4500
     OBS_AUDIO_BITRATE_KBPS: int = 160
     OBS_KEYFRAME_SEC: int = 2
 
