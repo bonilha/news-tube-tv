@@ -274,14 +274,12 @@ class OBSManager:
             return True, ""
 
         video = await self._request("SetVideoSettings", {
-            "videoSettings": {
-                "baseWidth": settings.OBS_BASE_WIDTH,
-                "baseHeight": settings.OBS_BASE_HEIGHT,
-                "outputWidth": settings.OBS_BASE_WIDTH,
-                "outputHeight": settings.OBS_BASE_HEIGHT,
-                "fpsNumerator": settings.OBS_FPS_NUM,
-                "fpsDenominator": settings.OBS_FPS_DEN,
-            },
+            "baseWidth": settings.OBS_BASE_WIDTH,
+            "baseHeight": settings.OBS_BASE_HEIGHT,
+            "outputWidth": settings.OBS_BASE_WIDTH,
+            "outputHeight": settings.OBS_BASE_HEIGHT,
+            "fpsNumerator": settings.OBS_FPS_NUM,
+            "fpsDenominator": settings.OBS_FPS_DEN,
         })
         ok, comment = self._request_ok(video)
         if not ok:

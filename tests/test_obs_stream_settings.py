@@ -56,8 +56,11 @@ def test_simple_output_uses_env_bitrate(manager, monkeypatch):
         "parameterValue": "160",
     }) in calls
     video = next(data for kind, data in calls if kind == "SetVideoSettings")
-    assert video["videoSettings"]["baseWidth"] == 1920
-    assert video["videoSettings"]["outputHeight"] == 1080
+    assert video["baseWidth"] == 1920
+    assert video["baseHeight"] == 1080
+    assert video["outputWidth"] == 1920
+    assert video["outputHeight"] == 1080
+    assert "videoSettings" not in video
 
 
 def test_active_stream_skips_video_settings(manager):
