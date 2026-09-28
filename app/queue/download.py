@@ -33,8 +33,10 @@ _dirty = False
 _KEEP_STATUSES = ("playing", "pending")
 _protected_ids: set[str] = set()
 _hold_player_release = False
-# Already shown this pass, plus the one on air. They do not take a download slot.
+# Already shown this pass. They do not take a slot ahead of videos still waiting.
 _skip_keep: set[str] = set()
+# File OBS is playing. Kept on disk and not counted inside the five.
+_on_air_id: str = ""
 _stuck_deletes: set[str] = set()
 _PLAYER_SOURCE = "NewsTube Fila"
 _MEDIA_STOP = "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP"
@@ -53,13 +55,15 @@ def hold_player_release(hold: bool) -> None:
 
 
 def skip_keep_ids(video_ids: set[str]) -> None:
-    """Ids that must not occupy one of the QUEUE_DOWNLOAD_KEEP slots.
-
-    The file of an id that is also protected is kept. An id that is only
-    skipped (already aired) is deleted on the next sync.
-    """
+    """Ids already shown this pass. They fill a slot only after the unplayed run out."""
     global _skip_keep
     _skip_keep = set(video_ids)
+
+
+def note_on_air(video_id: str) -> None:
+    """The file OBS is playing stays on disk and does not use a window slot."""
+    global _on_air_id
+    _on_air_id = video_id or ""
 
 
 def selected_encoder() -> str | None:
@@ -108,13 +112,12 @@ def _encoder_works(name: str, args: tuple[str, ...]) -> bool:
 
 
 def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list[str]:
-    """Next `limit` video ids that are still unplayed.
+    """Next `limit` video ids that are still unplayed this pass.
 
     After a shuffle, play_order is the queue. Before that, playing comes
     first and then the oldest pending. Ids in `skip` (already aired this
-    pass, or the one on air) do not consume a slot. Videos with a
-    download_error are also excluded — they cannot be downloaded until
-    the user retries them manually.
+    pass) do not consume a slot. Videos with a download_error are also
+    excluded — they cannot be downloaded until the user retries them manually.
     """
     if limit <= 0:
         return []
@@ -143,25 +146,26 @@ def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list
 
 
 def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list[str]:
-    """Unplayed ids first, then already aired ones if the queue is running out.
+    """Unplayed ids first. Aired ids fill only the slots those leave empty.
 
-    The player keeps a file for what is still ahead. Aired videos fill the
-    rest of the window so the next pass can download before the current one ends.
-    Videos with download errors are excluded — they cannot fill a buffer slot.
+    Five videos still waiting this pass use the whole window, so nothing from
+    the next lap is downloaded yet. With four waiting, the first aired id in
+    play order takes the free slot. Download errors stay out of the window.
     """
     fresh = keep_ids(rows, limit, skip)
     if len(fresh) >= limit:
         return fresh
-    # When unplayed videos are not enough to fill limit, fill from unskipped rows (including played)
     remaining_limit = limit - len(fresh)
-    seen = set(fresh) | (skip or set())
+    seen = set(fresh)
+    skipped = skip or set()
     filler: list[str] = []
     shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
     max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     candidates = [
         row for row in rows
-        if row.get("status") in ("playing", "pending", "played")
+        if row.get("video_id") in skipped
         and row.get("video_id") not in seen
+        and row.get("status") in ("playing", "pending", "played")
         and int(row.get("duration") or 0) <= max_duration_sec
         and not row.get("download_error")
     ]
@@ -177,6 +181,14 @@ def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> li
             filler.append(vid)
             seen.add(vid)
     return fresh + filler
+
+
+def retain_ids(rows: list[dict], limit: int, skip: set[str] | None = None, on_air: str = "") -> set[str]:
+    """Files that stay: the download window, plus the id on air."""
+    keep = set(buffer_ids(rows, limit, skip))
+    if on_air:
+        keep.add(on_air)
+    return keep
 
 
 def files_outside_keep(directory: Path, keep: set[str]) -> list[Path]:
@@ -328,16 +340,21 @@ async def sync_downloads() -> None:
     await purge_expired()
     rows = await _queue_rows()
     keep = buffer_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep)
-    keep_set = set(keep) | set(_protected_ids)
+    keep_set = retain_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep, _on_air_id)
 
     if not _encoder:
         log.warning("Skipping downloads: no H.264 encoder")
-        return
-    if not yt_cookies.ensure_fresh():
+    elif not yt_cookies.ensure_fresh():
         log.warning("Skipping downloads: %s", yt_cookies.status()["message"])
-        return
+    else:
+        await _download_keep(keep)
 
-    by_id = {row["video_id"]: row for row in rows}
+    await _forget_paths_outside(keep_set)
+    await remove_files(files_outside_keep(settings.VIDEOS_DIR, keep_set))
+
+
+async def _download_keep(keep: list[str]) -> None:
+    """Download MP4s for the window. Missing files do not keep other ids on disk."""
     for video_id in keep:
         final = settings.VIDEOS_DIR / f"{video_id}.mp4"
         current = await _one_row(video_id)
@@ -380,22 +397,6 @@ async def sync_downloads() -> None:
             ])
         else:
             await _store_error(video_id, "yt-dlp did not produce an MP4")
-        by_id.pop(video_id, None)
-
-    ready = 0
-    for video_id in keep:
-        final = settings.VIDEOS_DIR / f"{video_id}.mp4"
-        if final.exists() and final.stat().st_size > 0:
-            ready += 1
-    # Only count downloadable (non-errored) ids toward the readiness threshold.
-    # Errored ids are excluded from keep by keep_ids, so this is already guaranteed,
-    # but we guard explicitly for safety.
-    downloadable_keep = len(keep)
-    if keep and ready < downloadable_keep:
-        log.info("Keeping extra MP4s until %d of %d buffer files exist", ready, downloadable_keep)
-        return
-    await _forget_paths_outside(keep_set)
-    await remove_files(files_outside_keep(settings.VIDEOS_DIR, keep_set))
 
 
 def _codecs(path: Path) -> tuple[str, str]:

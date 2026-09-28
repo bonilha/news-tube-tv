@@ -6,6 +6,7 @@ import logging
 from enum import Enum
 from pathlib import Path
 
+from app.config import settings
 from app.obs.manager import SCENE_BUMPER, SCENE_PROGRAM, obs_manager
 from app.overlay import service as overlay
 from app.queue import download as queue_download
@@ -30,6 +31,25 @@ def _playable(row: dict) -> bool:
     return bool(path) and Path(path).is_file()
 
 
+def next_in_pass(rows: list[dict], aired: set[str]) -> tuple[dict | None, bool]:
+    """Next row this pass, or the first row when every row already aired.
+
+    The second value is true when the choice is the start of the next lap.
+    A row without an MP4 is still the choice. The caller waits for that file.
+    """
+    unplayed = [row for row in rows if (row.get("video_id") or "") not in aired]
+    if unplayed:
+        return unplayed[0], False
+    if not rows:
+        return None, False
+    return rows[0], True
+
+
+def tail_scan_due(unplayed: int, limit: int, already: bool) -> bool:
+    """One channel scan when this pass has limit videos left, or fewer."""
+    return unplayed > 0 and limit > 0 and unplayed <= limit and not already
+
+
 class CycleManager:
     """Singleton. Controls the bumper↔video playback cycle."""
 
@@ -49,6 +69,7 @@ class CycleManager:
             cls._instance._pass_items = []
             cls._instance._current_id = ""
             cls._instance._aired = set()
+            cls._instance._tail_scanned = False
             cls._instance._error = False
             cls._instance._listening = False
         return cls._instance
@@ -134,11 +155,9 @@ class CycleManager:
         queue_download.protect_video_ids(ids)
 
     def _publish_keep_skip(self) -> None:
-        """Aired videos and the one on air do not count toward the five MP4s."""
-        skip = set(self._aired)
-        if self._current_id:
-            skip.add(self._current_id)
-        queue_download.skip_keep_ids(skip)
+        """Aired videos fill the window only after the unplayed ones run out."""
+        queue_download.note_on_air(self._current_id)
+        queue_download.skip_keep_ids(set(self._aired))
         queue_download.schedule_sync()
 
     async def enable(self) -> dict:
@@ -224,6 +243,7 @@ class CycleManager:
         self._current_video_title = ""
         self._current_id = ""
         self._aired = set()
+        self._tail_scanned = False
         self._message = ""
         self._pass_items = []
         self._protect()
@@ -339,14 +359,35 @@ class CycleManager:
         self._current_id = ""
         self._protect()
 
-    def _take_next(self) -> dict | None:
-        while self._pass_items:
-            video = self._pass_items.pop(0)
-            self._protect()
-            if _playable(video):
-                return video
-            log.info("Skipping item without MP4: %s", video.get("title"))
-        return None
+    async def _take_next(self) -> dict | None:
+        """First video that has not aired this pass. Waits on a missing MP4.
+
+        With five or fewer still waiting, scan channels once so a new video
+        can join the end before anything repeats. An empty unplayed list
+        starts the same order again.
+        """
+        rows = await queue_svc.get_queue_full()
+        aired = set(self._aired)
+        unplayed = [row for row in rows if (row.get("video_id") or "") not in aired]
+        limit = settings.QUEUE_DOWNLOAD_KEEP
+        if len(unplayed) > limit:
+            self._tail_scanned = False
+        elif tail_scan_due(len(unplayed), limit, self._tail_scanned):
+            await queue_svc.maintain_queue()
+            self._tail_scanned = True
+            rows = await queue_svc.get_queue_full()
+            unplayed = [row for row in rows if (row.get("video_id") or "") not in aired]
+        video, wrapped = next_in_pass(rows, aired)
+        if wrapped:
+            self._aired = set()
+            self._tail_scanned = False
+            self._publish_keep_skip()
+            rows = await queue_svc.get_queue_full()
+            video, _wrapped = next_in_pass(rows, self._aired)
+            unplayed = list(rows)
+        self._pass_items = unplayed
+        self._protect()
+        return video
 
     async def _run_cycle(self):
         """Main loop: bumper → video → bumper → ..."""
@@ -369,7 +410,7 @@ class CycleManager:
                 if not self._enabled:
                     return
 
-                video = self._take_next()
+                video = await self._take_next()
                 if video is None:
                     if not self._enabled:
                         return
@@ -378,22 +419,22 @@ class CycleManager:
                         self._error = True
                         log.info("No MP4 available — stopping cycle")
                         return
-                    # Round-robin: played videos were already rotated to the
-                    # end of the queue.  Just reload from the DB.
-                    self._aired = set()
-                    self._publish_keep_skip()
-                    await self._load_pass()
-                    played_any = False
-                    if not any(_playable(row) for row in self._pass_items):
-                        self._message = _NO_FILE
-                        self._error = True
-                        log.info("No MP4 in refreshed queue — waiting for the buffer")
-                        await asyncio.sleep(2)
+                    self._message = _NO_FILE
+                    self._error = True
+                    await asyncio.sleep(2)
+                    continue
+                if not _playable(video):
+                    log.info("Waiting for MP4: %s", video.get("title"))
+                    self._message = "Aguardando o arquivo do próximo vídeo."
+                    self._error = False
+                    queue_download.schedule_sync()
+                    await asyncio.sleep(2)
                     continue
 
                 file_path = video.get("local_path") or ""
                 self._current_id = video.get("video_id") or ""
                 self._protect()
+                self._publish_keep_skip()
                 await queue_svc.mark_status_by_video_id(self._current_id, "playing")
                 await obs_manager.set_input_settings(PLAYER_SOURCE, {
                     "is_local_file": True,
@@ -426,6 +467,7 @@ class CycleManager:
             self._current_id = ""
             self._pass_items = []
             self._protect()
+            queue_download.note_on_air("")
             queue_download.hold_player_release(False)
             await overlay.hide()
             log.info("Cycle stopped")

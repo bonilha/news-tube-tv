@@ -60,7 +60,7 @@
                 {% endif %}
             </td>
             <td>
-                {% if item.video_id == on_air or item.status == 'playing' %}
+                {% if item.video_id == on_air %}
                     <span class="status-badge status-on">NO AR</span>
                 {% elif item.video_id in aired %}
                     <span class="status-badge" style="background:#1e40af; color:#fff;">TRANSMITIDO ({{ item.play_count }})</span>
