@@ -26,6 +26,16 @@ CREATE TABLE IF NOT EXISTS channels (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS stream_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    mode TEXT NOT NULL DEFAULT 'custom',
+    service TEXT NOT NULL DEFAULT '',
+    region TEXT NOT NULL DEFAULT '',
+    stream_key TEXT NOT NULL DEFAULT '',
+    server_url TEXT NOT NULL DEFAULT '',
+    services_path TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id INTEGER NOT NULL,

@@ -162,6 +162,10 @@
            hx-get="/queue" hx-target="#content" hx-push-url="true">
             Queue
         </a>
+        <a href="/configs" class="nav-item{% if request.url.path == '/configs' %} active{% endif %}" id="nav-configs"
+           hx-get="/configs" hx-target="#content" hx-push-url="true">
+            Configs
+        </a>
 
     </aside>
     <main id="content">

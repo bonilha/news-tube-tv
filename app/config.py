@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     OBS_FPS_NUM: int = 30000
     OBS_FPS_DEN: int = 1001
 
+    # Empty uses the OBS install location for the platform.
+    OBS_SERVICES_JSON: str = ""
     RTMP_URL: str = "rtmp://localhost/live"
     RTMP_KEY: str = "stream"
 

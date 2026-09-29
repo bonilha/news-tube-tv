@@ -252,13 +252,17 @@ class OBSManager:
         """Write the configured RTMP target into OBS, then start the output."""
         if not self._ws:
             return False, "OBS não está conectado."
+        from app.obs.stream_config import get_stream_config, service_payload, services_for
+
+        config = await get_stream_config()
+        services, _path = services_for(config)
+        built = service_payload(config, services)
+        if isinstance(built, str):
+            return False, built
+        service_type, service_settings = built
         service = await self._request("SetStreamServiceSettings", {
-            "streamServiceType": "rtmp_custom",
-            "streamServiceSettings": {
-                "server": settings.RTMP_URL,
-                "key": settings.RTMP_KEY,
-                "use_auth": False,
-            },
+            "streamServiceType": service_type,
+            "streamServiceSettings": service_settings,
         })
         service_status = (service or {}).get("requestStatus", {})
         if not service or not service_status.get("result", False):

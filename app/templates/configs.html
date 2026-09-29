@@ -1,0 +1,107 @@
+{% if not htmx %}{% extends "base.html" %}{% endif %}
+{% block content %}
+<h1 class="mb-2">Configs</h1>
+
+{% if saved %}
+<div class="card mb-2">Salvo. O OBS recebe isso no próximo início de transmissão.</div>
+{% endif %}
+{% if services_missing %}
+<div class="card mb-2">O services.json indicado não foi encontrado. O modo custom continua disponível.</div>
+{% elif not services %}
+<div class="card mb-2">Nenhum services.json do OBS foi encontrado. Indique o arquivo abaixo ou use o modo custom.</div>
+{% endif %}
+
+<form method="post" action="/configs" hx-post="/configs" hx-target="#content" hx-swap="innerHTML" class="card">
+    <div class="mb-2">
+        <label class="text-sm text-muted" for="services-path">services.json do OBS</label>
+        <input type="text" id="services-path" name="services_path" value="{{ config.services_path }}"
+               placeholder="{{ services_found or 'caminho do services.json' }}"
+               style="width:100%; padding:0.5rem; border-radius:0.375rem; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); margin-top:0.25rem;">
+    </div>
+
+    <div class="mb-2">
+        <label class="text-sm text-muted">Destino</label>
+        <div class="mt-1">
+            <label><input type="radio" name="mode" value="preset" {% if services and config.mode == 'preset' %}checked{% endif %} {% if not services %}disabled{% endif %}> Preset do OBS</label>
+            <label class="ml-2"><input type="radio" name="mode" value="custom" {% if not services or config.mode != 'preset' %}checked{% endif %}> Custom</label>
+        </div>
+    </div>
+
+    <div class="mb-2" id="preset-fields">
+        <label class="text-sm text-muted" for="service">Serviço</label>
+        <select id="service" name="service" style="width:100%; padding:0.5rem; margin-top:0.25rem;">
+            <option value="">—</option>
+            {% for item in services %}
+            <option value="{{ item.name }}" {% if config.service == item.name %}selected{% endif %}>{{ item.name }}</option>
+            {% endfor %}
+        </select>
+        <div id="region-wrap" class="mt-2">
+            <label class="text-sm text-muted" for="region">Região</label>
+            <select id="region" name="region" style="width:100%; padding:0.5rem; margin-top:0.25rem;"></select>
+        </div>
+    </div>
+
+    <div class="mb-2" id="url-wrap">
+        <label class="text-sm text-muted" for="server-url">URL</label>
+        <input type="text" id="server-url" name="server_url" value="{{ config.server_url }}"
+               style="width:100%; padding:0.5rem; border-radius:0.375rem; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); margin-top:0.25rem;">
+    </div>
+
+    <div class="mb-2">
+        <label class="text-sm text-muted" for="stream-key">Chave</label>
+        <input type="password" id="stream-key" name="stream_key" value="" autocomplete="new-password"
+               placeholder="em branco mantém a chave salva"
+               style="width:100%; padding:0.5rem; border-radius:0.375rem; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); margin-top:0.25rem;">
+    </div>
+
+    <button type="submit" class="btn btn-primary">Salvar</button>
+</form>
+
+<script>
+(function () {
+    var services = {{ services_json | safe }};
+    var savedRegion = {{ config.region | tojson }};
+    var serviceEl = document.getElementById("service");
+    var regionEl = document.getElementById("region");
+    var regionWrap = document.getElementById("region-wrap");
+    var presetFields = document.getElementById("preset-fields");
+    var urlWrap = document.getElementById("url-wrap");
+
+    function selectedMode() {
+        var picked = document.querySelector("input[name=mode]:checked");
+        return picked ? picked.value : "custom";
+    }
+
+    function fillRegions() {
+        var name = serviceEl.value;
+        var match = services.find(function (item) { return item.name === name; });
+        var servers = match ? match.servers : [];
+        regionEl.innerHTML = "";
+        servers.forEach(function (server) {
+            var option = document.createElement("option");
+            option.value = server.name;
+            option.textContent = server.name;
+            if (server.name === savedRegion) option.selected = true;
+            regionEl.appendChild(option);
+        });
+        regionWrap.style.display = servers.length > 1 ? "" : "none";
+    }
+
+    function applyMode() {
+        var preset = selectedMode() === "preset";
+        presetFields.style.display = preset ? "" : "none";
+        urlWrap.style.display = preset ? "none" : "";
+        if (preset) fillRegions();
+    }
+
+    document.querySelectorAll("input[name=mode]").forEach(function (input) {
+        input.addEventListener("change", applyMode);
+    });
+    serviceEl.addEventListener("change", function () {
+        savedRegion = "";
+        fillRegions();
+    });
+    applyMode();
+})();
+</script>
+{% endblock %}
