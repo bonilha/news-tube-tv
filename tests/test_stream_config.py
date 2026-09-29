@@ -2,7 +2,7 @@
 
 import json
 
-from app.obs.services import load_services, locate_services_file
+from app.obs.services import candidate_paths, load_services, locate_services_file
 from app.obs.stream_config import service_payload
 
 TWITTER = {
@@ -50,6 +50,12 @@ def test_custom_uses_the_url():
     )
     assert kind == "rtmp_custom"
     assert payload["server"] == "rtmp://localhost/live"
+
+
+def test_install_locations_can_be_listed():
+    paths = candidate_paths()
+    assert paths
+    assert all(path.name == "services.json" for path in paths)
 
 
 def test_saved_path_is_the_services_file(monkeypatch, tmp_path):
