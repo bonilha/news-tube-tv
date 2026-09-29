@@ -15,14 +15,14 @@ TWITTER = {
 }
 
 
-def test_preset_sends_the_region_name_not_the_url():
+def test_preset_sends_the_region_url():
     built = service_payload(
         {"mode": "preset", "service": "X", "region": "South America: São Paulo, Brazil", "stream_key": "abc"},
         [TWITTER],
     )
     assert built == (
         "rtmp_common",
-        {"service": "Twitter", "key": "abc", "server": "South America: São Paulo, Brazil"},
+        {"service": "Twitter", "key": "abc", "server": "rtmps://br.pscp.tv:443/x"},
     )
 
 
@@ -40,7 +40,7 @@ def test_one_server_ignores_a_blank_region():
         [solo],
     )
     assert kind == "rtmp_common"
-    assert payload["server"] == "Primary"
+    assert payload["server"] == "rtmp://example/live"
 
 
 def test_custom_uses_the_url():

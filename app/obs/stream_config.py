@@ -72,14 +72,15 @@ def service_payload(config: dict, services: list[dict]) -> tuple[str, dict] | st
     if len(servers) > 1:
         if region not in names:
             return "Escolha a região em Configs."
-        server_name = region
+        chosen = next(item for item in servers if item["name"] == region)
     elif len(servers) == 1:
-        server_name = names[0]
+        chosen = servers[0]
     else:
-        server_name = ""
+        chosen = None
+    # The combo shows the region name. The value OBS connects with is the URL.
     payload = {"service": service["name"], "key": key}
-    if server_name:
-        payload["server"] = server_name
+    if chosen and chosen["url"]:
+        payload["server"] = chosen["url"]
     return "rtmp_common", payload
 
 
