@@ -1,5 +1,7 @@
 """Download window and which row the cycle picks next."""
 
+import time
+
 from app.cycle import next_in_pass, tail_scan_due
 from app.queue.download import buffer_ids, retain_ids
 
@@ -9,7 +11,7 @@ def _row(video_id: str, play_order: int, **extra) -> dict:
         "id": play_order,
         "video_id": video_id,
         "status": "pending",
-        "published_unix": 0,
+        "published_unix": int(time.time()),
         "play_order": play_order,
         "duration": 60,
         "download_error": "",
@@ -65,6 +67,22 @@ def test_sixth_unplayed_is_outside_even_if_its_file_is_still_downloading():
     keep = retain_ids(rows, 5, set())
     assert keep == {"a", "b", "c", "d", "e"}
     assert "f" not in keep
+
+
+def test_video_older_than_a_day_does_not_take_a_slot_or_block_playback():
+    now = int(time.time())
+    rows = [
+        _row("stale", 1, published_unix=now - 90000),
+        _row("a", 2),
+        _row("b", 3),
+        _row("c", 4),
+        _row("d", 5),
+        _row("e", 6),
+    ]
+    assert buffer_ids(rows, 5, set()) == ["a", "b", "c", "d", "e"]
+    video, wrapped = next_in_pass(rows, set())
+    assert wrapped is False
+    assert video["video_id"] == "a"
 
 
 def test_missing_file_does_not_skip_to_an_aired_download():

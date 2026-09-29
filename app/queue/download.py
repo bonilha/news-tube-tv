@@ -154,13 +154,11 @@ def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list
     if limit <= 0:
         return []
     skipped = skip or set()
-    max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     eligible = [
         row for row in rows
         if row.get("status") in _KEEP_STATUSES
         and row.get("video_id") not in skipped
-        and int(row.get("duration") or 0) <= max_duration_sec
-        and not row.get("download_error")
+        and not download_blocked(row)
     ]
     shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
     if shuffled:
@@ -192,14 +190,11 @@ def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> li
     skipped = skip or set()
     filler: list[str] = []
     shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
-    max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     candidates = [
         row for row in rows
         if row.get("video_id") in skipped
         and row.get("video_id") not in seen
-        and row.get("status") in ("playing", "pending", "played")
-        and int(row.get("duration") or 0) <= max_duration_sec
-        and not row.get("download_error")
+        and not download_blocked(row)
     ]
     if shuffled:
         candidates.sort(key=lambda r: (int(r.get("play_order") or 0), int(r.get("id") or 0)))
@@ -345,15 +340,22 @@ async def discard_video_files(video_id: str, local_path: str = "") -> None:
     await remove_files(paths)
 
 
-def _downloadable(row: dict) -> bool:
+def download_blocked(row: dict) -> bool:
+    """Too old, too long, failed, or not a queue status. It must not take a window slot."""
     if row.get("status") not in ("playing", "pending", "played"):
-        return False
+        return True
+    if row.get("download_error"):
+        return True
     if int(row.get("published_unix") or 0) < int(time.time()) - 86400:
-        return False
+        return True
     max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     if int(row.get("duration") or 0) > max_duration_sec:
-        return False
-    return True
+        return True
+    return False
+
+
+def _downloadable(row: dict) -> bool:
+    return not download_blocked(row)
 
 
 async def _one_row(video_id: str) -> dict | None:

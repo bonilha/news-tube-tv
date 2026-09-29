@@ -31,18 +31,29 @@ def _playable(row: dict) -> bool:
     return bool(path) and Path(path).is_file()
 
 
+def _pass_rows(rows: list[dict], aired: set[str]) -> list[dict]:
+    """Rows still ahead this pass that can be downloaded. The rest do not block."""
+    return [
+        row for row in rows
+        if (row.get("video_id") or "") not in aired
+        and not queue_download.download_blocked(row)
+    ]
+
+
 def next_in_pass(rows: list[dict], aired: set[str]) -> tuple[dict | None, bool]:
-    """Next row this pass, or the first row when every row already aired.
+    """Next row this pass, or the first row when every downloadable row already aired.
 
     The second value is true when the choice is the start of the next lap.
-    A row without an MP4 is still the choice. The caller waits for that file.
+    A downloadable row without an MP4 is still the choice. The caller waits for that file.
+    A row that cannot be downloaded is skipped.
     """
-    unplayed = [row for row in rows if (row.get("video_id") or "") not in aired]
+    unplayed = _pass_rows(rows, aired)
     if unplayed:
         return unplayed[0], False
-    if not rows:
+    lap = _pass_rows(rows, set())
+    if not lap:
         return None, False
-    return rows[0], True
+    return lap[0], True
 
 
 def tail_scan_due(unplayed: int, limit: int, already: bool) -> bool:
@@ -355,7 +366,7 @@ class CycleManager:
             self._media_ended.clear()
 
     async def _load_pass(self) -> None:
-        self._pass_items = list(await queue_svc.get_queue_full())
+        self._pass_items = _pass_rows(list(await queue_svc.get_queue_full()), set())
         self._current_id = ""
         self._protect()
 
@@ -368,7 +379,7 @@ class CycleManager:
         """
         rows = await queue_svc.get_queue_full()
         aired = set(self._aired)
-        unplayed = [row for row in rows if (row.get("video_id") or "") not in aired]
+        unplayed = _pass_rows(rows, aired)
         limit = settings.QUEUE_DOWNLOAD_KEEP
         if len(unplayed) > limit:
             self._tail_scanned = False
@@ -376,7 +387,7 @@ class CycleManager:
             await queue_svc.maintain_queue()
             self._tail_scanned = True
             rows = await queue_svc.get_queue_full()
-            unplayed = [row for row in rows if (row.get("video_id") or "") not in aired]
+            unplayed = _pass_rows(rows, aired)
         video, wrapped = next_in_pass(rows, aired)
         if wrapped:
             self._aired = set()
@@ -384,7 +395,7 @@ class CycleManager:
             self._publish_keep_skip()
             rows = await queue_svc.get_queue_full()
             video, _wrapped = next_in_pass(rows, self._aired)
-            unplayed = list(rows)
+            unplayed = _pass_rows(rows, set())
         self._pass_items = unplayed
         self._protect()
         return video
