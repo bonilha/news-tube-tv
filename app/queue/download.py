@@ -379,6 +379,7 @@ async def sync_downloads() -> None:
     await purge_expired()
     rows = await _queue_rows()
     await _clear_missing_paths(rows)
+    await _clear_finishable_errors(rows)
     keep = buffer_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep)
     keep_set = retain_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep, _on_air_id)
 
@@ -410,6 +411,19 @@ async def _download_keep(keep: list[str]) -> None:
         if final.exists() and final.stat().st_size > 0:
             await _store_path(video_id, final)
             continue
+        if raw_download(video_id):
+            try:
+                await asyncio.to_thread(_place_in_queue, video_id)
+            except Exception as exc:
+                log.exception("Could not move %s into the queue folder", video_id)
+                await _store_error(video_id, str(exc)[:300])
+                continue
+            if final.exists() and final.stat().st_size > 0:
+                await _store_path(video_id, final)
+                await remove_files([
+                    path for path in _leftovers(video_id) if path != final
+                ])
+                continue
         if not _enough_free_space():
             log.warning(
                 "Free space below %s MB; not downloading %s",
@@ -600,70 +614,95 @@ def _try_unlink(path: Path, *, locked_message: bool = False) -> bool:
     return True
 
 
+def raw_download(video_id: str) -> Path | None:
+    """Finished yt-dlp file for this id. Partial fragments do not count."""
+    directory = downloads_dir()
+    if not directory.is_dir():
+        return None
+    finished = [
+        path for path in directory.iterdir()
+        if path.is_file()
+        and path.stat().st_size > 0
+        and path.name.startswith(video_id + ".")
+        and ".part" not in path.name
+        and ".encode." not in path.name
+    ]
+    merged = [path for path in finished if path.name == f"{video_id}.mp4"]
+    if merged:
+        return merged[0]
+    return None
+
+
+def _run_ffmpeg(source: Path, dest: Path, args: list[str]) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-i", str(source), *args, str(dest),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=_DOWNLOAD_TIMEOUT_SEC)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"ffmpeg failed: {exc}") from exc
+    if result.returncode != 0 or not dest.exists() or dest.stat().st_size <= 0:
+        err = (result.stderr or b"").decode("utf-8", "replace").strip()
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(err[-400:] or "ffmpeg produced no MP4")
+
+
+def _place_in_queue(video_id: str) -> None:
+    """Move or encode the downloaded file into videos/queue. Runs after yt-dlp."""
+    source = raw_download(video_id)
+    if source is None:
+        raise RuntimeError("yt-dlp did not leave a finished file in downloads")
+    final = queue_file(video_id)
+    video_codec, audio_codec = _codecs(source)
+    width, height = _video_size(source)
+    target = (settings.OBS_BASE_WIDTH, settings.OBS_BASE_HEIGHT)
+    needs_scale = needs_video_scale(video_codec, width, height, target)
+    log.info(
+        "Downloaded %s video=%s audio=%s container=%s size=%sx%s",
+        video_id, video_codec or "?", audio_codec or "?", source.suffix,
+        width or "?", height or "?",
+    )
+    if (
+        not needs_scale
+        and video_codec == "h264"
+        and audio_codec == "aac"
+        and source.suffix.lower() == ".mp4"
+    ):
+        log.info("Already H.264 + AAC in MP4, moving to queue: %s", video_id)
+        if source.resolve() != final.resolve():
+            final.parent.mkdir(parents=True, exist_ok=True)
+            source.replace(final)
+        return
+    if needs_scale:
+        if not _encoder:
+            raise RuntimeError("no H.264 encoder to scale to Full HD")
+        log.info("Scale %sx%s to %sx%s: %s", width, height, target[0], target[1], video_id)
+        audio = ["-c:a", "copy"] if audio_codec == "aac" else ["-c:a", "aac", "-b:a", "160k"]
+        args = ["-vf", _scale_filter(), "-c:v", _encoder, *_encoder_args, *audio]
+    elif video_codec in {"", "h264"} and audio_codec in {"", "aac"}:
+        log.info("Remux only: %s", video_id)
+        args = ["-c", "copy"]
+    elif video_codec == "h264":
+        log.info("Copy video, encode audio to AAC: %s", video_id)
+        args = ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k"]
+    else:
+        if not _encoder:
+            raise RuntimeError(f"no H.264 encoder for codec {video_codec or 'unknown'}")
+        log.info("Encode video to H.264 because codec is %s: %s", video_codec, video_id)
+        args = ["-c:v", _encoder, *_encoder_args, "-c:a", "aac", "-b:a", "160k"]
+    temp = downloads_dir() / f"{video_id}.encode.mp4"
+    if temp.exists():
+        temp.unlink()
+    _run_ffmpeg(source, temp, args)
+    temp.replace(final)
+    if source.exists() and source.resolve() != final.resolve():
+        source.unlink()
+
+
 def _download_mp4(video_id: str) -> None:
     import yt_dlp
-    from yt_dlp.postprocessor import FFmpegPostProcessor
-    from yt_dlp.utils import PostProcessingError
-
-    class _H264PP(FFmpegPostProcessor):
-        """Remux H.264+AAC to MP4. Encode only the streams that are not already that."""
-
-        def run(self, info):
-            source = Path(info["filepath"])
-            final = queue_file(video_id)
-            video_codec, audio_codec = _codecs(source)
-            width, height = _video_size(source)
-            target = (settings.OBS_BASE_WIDTH, settings.OBS_BASE_HEIGHT)
-            needs_scale = needs_video_scale(video_codec, width, height, target)
-            log.info(
-                "Downloaded %s video=%s audio=%s container=%s size=%sx%s",
-                video_id, video_codec or "?", audio_codec or "?", source.suffix,
-                width or "?", height or "?",
-            )
-            if (
-                not needs_scale
-                and video_codec == "h264"
-                and audio_codec == "aac"
-                and source.suffix.lower() == ".mp4"
-            ):
-                log.info("Already H.264 + AAC in MP4 at %sx%s, no encode: %s", *target, video_id)
-                if source.resolve() != final.resolve():
-                    source.replace(final)
-                info["filepath"] = str(final)
-                info["ext"] = "mp4"
-                return [], info
-            if needs_scale:
-                if not _encoder:
-                    raise PostProcessingError("no H.264 encoder to scale to Full HD")
-                log.info(
-                    "Scale %sx%s to %sx%s: %s",
-                    width, height, target[0], target[1], video_id,
-                )
-                audio = ["-c:a", "copy"] if audio_codec == "aac" else ["-c:a", "aac", "-b:a", "160k"]
-                args = ["-vf", _scale_filter(), "-c:v", _encoder, *_encoder_args, *audio]
-            elif video_codec in {"", "h264"} and audio_codec in {"", "aac"}:
-                log.info("Remux only: %s", video_id)
-                args = ["-c", "copy"]
-            elif video_codec == "h264":
-                log.info("Copy video, encode audio to AAC: %s", video_id)
-                args = ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k"]
-            else:
-                if not _encoder:
-                    raise PostProcessingError("no H.264 encoder for a non-H.264 video")
-                log.info("Encode video to H.264 because codec is %s: %s", video_codec, video_id)
-                args = ["-c:v", _encoder, *_encoder_args, "-c:a", "aac", "-b:a", "160k"]
-            temp = downloads_dir() / f"{video_id}.encode.mp4"
-            if temp.exists():
-                temp.unlink()
-            self.run_ffmpeg(str(source), str(temp), args)
-            if not temp.exists() or temp.stat().st_size <= 0:
-                raise PostProcessingError("ffmpeg produced no MP4")
-            temp.replace(final)
-            info["filepath"] = str(final)
-            info["ext"] = "mp4"
-            if source.resolve() == final.resolve():
-                return [], info
-            return [str(source)], info
 
     ensure_video_dirs()
     outtmpl = str(downloads_dir() / "%(id)s.%(ext)s")
@@ -691,8 +730,10 @@ def _download_mp4(video_id: str) -> None:
     opts["cookiefile"] = str(cookiefile)
     url = f"https://www.youtube.com/watch?v={video_id}"
     with yt_dlp.YoutubeDL(opts) as ydl:
-        ydl.add_post_processor(_H264PP(ydl), when="post_process")
         ydl.download([url])
+    # yt-dlp moves the file to the outtmpl after its own postprocessors.
+    # Placing it in queue has to happen after that, or it is moved back.
+    _place_in_queue(video_id)
 
 
 async def discard_all_downloads() -> None:
@@ -712,6 +753,27 @@ async def discard_all_downloads() -> None:
     doomed.extend(files_outside_keep(queue_dir(), set()))
     doomed.extend(files_outside_keep(settings.VIDEOS_DIR, set()))
     await remove_files(doomed)
+
+
+async def _clear_finishable_errors(rows: list[dict]) -> None:
+    """A raw file left in downloads can still be moved. The old error blocked that."""
+    ready = [
+        row["video_id"] for row in rows
+        if row.get("download_error") and raw_download(row["video_id"])
+    ]
+    if not ready:
+        return
+    async with get_db() as db:
+        for video_id in ready:
+            await db.execute(
+                "UPDATE queue SET download_error = '' WHERE video_id = ?",
+                (video_id,),
+            )
+        await db.commit()
+    for row in rows:
+        if row["video_id"] in ready:
+            row["download_error"] = ""
+    log.info("Cleared download errors for %d files waiting in downloads", len(ready))
 
 
 async def _clear_missing_paths(rows: list[dict]) -> None:
