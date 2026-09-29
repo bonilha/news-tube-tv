@@ -40,7 +40,7 @@ class Settings(BaseSettings):
     # Browser cookie export used by yt-dlp. Downloads do not run unless it passes.
     COOKIES_DIR: Path = Path("cookies")
 
-    # yt-dlp MP4s. Only the first N pending/playing videos stay on disk.
+    # videos/downloads holds the yt-dlp files. videos/queue holds playable MP4s.
     VIDEOS_DIR: Path = Path("videos")
     QUEUE_DOWNLOAD_KEEP: int = 5
     # Maximum video duration in minutes to be eligible for the queue (default 30 min)

@@ -57,7 +57,7 @@ async def _queue_refresh_loop() -> None:
 
 # Ensure runtime directories exist
 settings.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
-settings.VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+queue_download.ensure_video_dirs()
 Path("static").mkdir(parents=True, exist_ok=True)
 
 

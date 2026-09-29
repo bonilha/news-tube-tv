@@ -175,6 +175,9 @@ async def get_queue_full() -> list[dict]:
 def _with_thumb(row) -> dict:
     item = dict(row)
     item["thumb"] = invidious.absolute_thumb(item.get("video_id") or "", item.get("thumb"))
+    path = item.get("local_path") or ""
+    if path and not Path(path).is_file():
+        item["local_path"] = ""
     return item
 
 

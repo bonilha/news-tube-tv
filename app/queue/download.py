@@ -15,13 +15,44 @@ from app.queue import cookies as yt_cookies
 
 log = logging.getLogger(__name__)
 
-# Probed once at startup, in this order. Args are passed to ffmpeg via yt-dlp.
-_ENCODERS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("h264_nvenc", "NVIDIA NVENC H.264", ("-preset", "p4", "-rc", "vbr", "-cq", "23")),
-    ("h264_amf", "AMD HW H.264", ("-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23")),
-    ("h264_qsv", "Intel Quick Sync H.264", ("-preset", "medium", "-global_quality", "23")),
-    ("libx264", "CPU H.264", ("-preset", "veryfast", "-crf", "23")),
+# Probed once at startup, in this order. Each encoder can try more than one arg set.
+_ENCODERS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
+    ("h264_nvenc", "NVIDIA NVENC H.264", (
+        ("-preset", "p4", "-rc", "vbr", "-cq", "23"),
+        ("-preset", "fast", "-rc", "vbr", "-cq", "23"),
+    )),
+    ("h264_amf", "AMD HW H.264", (
+        ("-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"),
+    )),
+    ("h264_qsv", "Intel Quick Sync H.264", (
+        ("-preset", "medium", "-global_quality", "23"),
+    )),
+    ("libx264", "CPU H.264", (
+        ("-preset", "veryfast", "-crf", "23"),
+    )),
 )
+# A stalled YouTube connection must not hold the download lock until the process dies.
+_SOCKET_TIMEOUT_SEC = 30
+_DOWNLOAD_TIMEOUT_SEC = 45 * 60
+
+
+def downloads_dir() -> Path:
+    """Raw yt-dlp files. They are not playable and do not count as queued."""
+    return settings.VIDEOS_DIR / "downloads"
+
+
+def queue_dir() -> Path:
+    """Processed MP4s ready to play or already playing."""
+    return settings.VIDEOS_DIR / "queue"
+
+
+def queue_file(video_id: str) -> Path:
+    return queue_dir() / f"{video_id}.mp4"
+
+
+def ensure_video_dirs() -> None:
+    downloads_dir().mkdir(parents=True, exist_ok=True)
+    queue_dir().mkdir(parents=True, exist_ok=True)
 
 _encoder: str | None = None
 _encoder_args: tuple[str, ...] = ()
@@ -77,13 +108,14 @@ def selected_encoder_label() -> str:
 def probe_encoders() -> str | None:
     """Pick the first H.264 encoder that can actually encode a short frame."""
     global _encoder, _encoder_args, _encoder_label
-    for name, label, args in _ENCODERS:
-        if _encoder_works(name, args):
-            _encoder = name
-            _encoder_args = args
-            _encoder_label = label
-            log.info("yt-dlp H.264 encoder: %s (%s)", label, name)
-            return name
+    for name, label, arg_sets in _ENCODERS:
+        for args in arg_sets:
+            if _encoder_works(name, args):
+                _encoder = name
+                _encoder_args = args
+                _encoder_label = label
+                log.info("yt-dlp H.264 encoder: %s (%s) %s", label, name, " ".join(args))
+                return name
         log.info("H.264 encoder unavailable: %s (%s)", label, name)
     _encoder = None
     _encoder_args = ()
@@ -334,11 +366,19 @@ async def _one_row(video_id: str) -> dict | None:
     return dict(row) if row else None
 
 
+def needs_video_scale(video_codec: str, width: int, height: int, target: tuple[int, int]) -> bool:
+    """H.264 is remuxed. OBS fits it to the canvas. Other codecs are scaled while encoded."""
+    if video_codec == "h264":
+        return False
+    return width > 0 and height > 0 and (width, height) != target
+
+
 async def sync_downloads() -> None:
     """Download missing MP4s for the keep window and delete every other file."""
-    settings.VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_video_dirs()
     await purge_expired()
     rows = await _queue_rows()
+    await _clear_missing_paths(rows)
     keep = buffer_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep)
     keep_set = retain_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep, _on_air_id)
 
@@ -350,13 +390,19 @@ async def sync_downloads() -> None:
         await _download_keep(keep)
 
     await _forget_paths_outside(keep_set)
-    await remove_files(files_outside_keep(settings.VIDEOS_DIR, keep_set))
+    doomed: list[Path] = []
+    for directory in (downloads_dir(), queue_dir(), settings.VIDEOS_DIR):
+        doomed.extend(files_outside_keep(directory, keep_set))
+    await remove_files(doomed)
 
 
 async def _download_keep(keep: list[str]) -> None:
     """Download MP4s for the window. Missing files do not keep other ids on disk."""
     for video_id in keep:
-        final = settings.VIDEOS_DIR / f"{video_id}.mp4"
+        final = queue_file(video_id)
+        legacy = settings.VIDEOS_DIR / f"{video_id}.mp4"
+        if not final.exists() and legacy.is_file():
+            legacy.replace(final)
         current = await _one_row(video_id)
         if current is None or not _downloadable(current):
             await remove_files(_leftovers(video_id))
@@ -371,7 +417,16 @@ async def _download_keep(keep: list[str]) -> None:
             )
             break
         try:
-            await asyncio.to_thread(_download_mp4, video_id)
+            await asyncio.wait_for(
+                asyncio.to_thread(_download_mp4, video_id),
+                timeout=_DOWNLOAD_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            log.error("Download timed out for %s", video_id)
+            _kill_media_tools()
+            await _store_error(video_id, "Download passou do tempo e foi interrompido")
+            await remove_files(_leftovers(video_id))
+            continue
         except Exception as exc:
             log.exception("Download failed for %s", video_id)
             text = str(exc)
@@ -467,15 +522,17 @@ def _enough_free_space() -> bool:
 
 
 def _leftovers(video_id: str) -> list[Path]:
-    directory = settings.VIDEOS_DIR
-    if not directory.is_dir():
-        return []
-    return [
-        path for path in directory.iterdir()
-        if path.is_file() and (
-            path.name == video_id or path.name.startswith(video_id + ".")
+    found: list[Path] = []
+    for directory in (downloads_dir(), queue_dir(), settings.VIDEOS_DIR):
+        if not directory.is_dir():
+            continue
+        found.extend(
+            path for path in directory.iterdir()
+            if path.is_file() and (
+                path.name == video_id or path.name.startswith(video_id + ".")
+            )
         )
-    ]
+    return found
 
 
 def _same_file(left: Path, right: Path) -> bool:
@@ -553,11 +610,11 @@ def _download_mp4(video_id: str) -> None:
 
         def run(self, info):
             source = Path(info["filepath"])
-            final = settings.VIDEOS_DIR / f"{video_id}.mp4"
+            final = queue_file(video_id)
             video_codec, audio_codec = _codecs(source)
             width, height = _video_size(source)
             target = (settings.OBS_BASE_WIDTH, settings.OBS_BASE_HEIGHT)
-            needs_scale = width > 0 and height > 0 and (width, height) != target
+            needs_scale = needs_video_scale(video_codec, width, height, target)
             log.info(
                 "Downloaded %s video=%s audio=%s container=%s size=%sx%s",
                 video_id, video_codec or "?", audio_codec or "?", source.suffix,
@@ -595,7 +652,7 @@ def _download_mp4(video_id: str) -> None:
                     raise PostProcessingError("no H.264 encoder for a non-H.264 video")
                 log.info("Encode video to H.264 because codec is %s: %s", video_codec, video_id)
                 args = ["-c:v", _encoder, *_encoder_args, "-c:a", "aac", "-b:a", "160k"]
-            temp = settings.VIDEOS_DIR / f"{video_id}.encode.mp4"
+            temp = downloads_dir() / f"{video_id}.encode.mp4"
             if temp.exists():
                 temp.unlink()
             self.run_ffmpeg(str(source), str(temp), args)
@@ -608,7 +665,8 @@ def _download_mp4(video_id: str) -> None:
                 return [], info
             return [str(source)], info
 
-    outtmpl = str(settings.VIDEOS_DIR / "%(id)s.%(ext)s")
+    ensure_video_dirs()
+    outtmpl = str(downloads_dir() / "%(id)s.%(ext)s")
     opts = {
         "outtmpl": outtmpl,
         "format": (
@@ -624,6 +682,7 @@ def _download_mp4(video_id: str) -> None:
         "noprogress": True,
         "retries": 3,
         "fragment_retries": 3,
+        "socket_timeout": _SOCKET_TIMEOUT_SEC,
         "windowsfilenames": True,
     }
     cookiefile = yt_cookies.netscape_path()
@@ -649,8 +708,30 @@ async def discard_all_downloads() -> None:
         doomed.extend(_leftovers(row["video_id"]))
         if row["local_path"]:
             doomed.append(Path(row["local_path"]))
+    doomed.extend(files_outside_keep(downloads_dir(), set()))
+    doomed.extend(files_outside_keep(queue_dir(), set()))
     doomed.extend(files_outside_keep(settings.VIDEOS_DIR, set()))
     await remove_files(doomed)
+
+
+async def _clear_missing_paths(rows: list[dict]) -> None:
+    """Drop stored paths whose files are gone so the badge and the window agree."""
+    missing = []
+    for row in rows:
+        path = row.get("local_path") or ""
+        if path and not Path(path).is_file():
+            missing.append(row["video_id"])
+            row["local_path"] = ""
+    if not missing:
+        return
+    async with get_db() as db:
+        for video_id in missing:
+            await db.execute(
+                "UPDATE queue SET local_path = '' WHERE video_id = ?",
+                (video_id,),
+            )
+        await db.commit()
+    log.info("Cleared %d queue paths whose files are gone", len(missing))
 
 
 async def _queue_rows() -> list[dict]:
