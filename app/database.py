@@ -61,6 +61,10 @@ async def get_db() -> AsyncIterator[aiosqlite.Connection]:
     db = await aiosqlite.connect(str(settings.DB_PATH))
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys = ON")
+    # The cycle, the download sync and the HTMX polls write at the same time.
+    # Without this a locked database raises and can take the playback loop with it.
+    await db.execute("PRAGMA journal_mode = WAL")
+    await db.execute("PRAGMA busy_timeout = 5000")
     try:
         yield db
     finally:

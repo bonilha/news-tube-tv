@@ -47,6 +47,8 @@ class Settings(BaseSettings):
     QUEUE_DOWNLOAD_KEEP: int = 5
     # Maximum video duration in minutes to be eligible for the queue (default 30 min)
     QUEUE_MAX_DURATION_MINUTES: int = 30
+    # Give up on a media that will not finish and re-arm the cycle. 0 waits forever.
+    CYCLE_MAX_WAIT_MINUTES: int = 90
     # Stop starting a new download when the volume has less than this free.
     QUEUE_MIN_FREE_MB: int = 1024
 

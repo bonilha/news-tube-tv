@@ -10,6 +10,7 @@ import base64
 import hashlib
 import json
 import logging
+import time
 import uuid
 from typing import Any, Awaitable, Callable
 
@@ -18,6 +19,9 @@ import websockets
 from app.config import settings
 
 log = logging.getLogger(__name__)
+
+# Two callers that notice the same dead socket must not open two connections.
+_CONNECT_RETRY_SEC = 2.0
 
 # Canonical scene names
 SCENE_PROGRAM = "SCENE_PROGRAM"
@@ -79,7 +83,9 @@ class OBSManager:
             cls._instance._pending_requests: dict[str, asyncio.Future] = {}
             cls._instance._event_handlers: list[Callable[[str, dict], Awaitable[None]]] = []
             cls._instance._reader_task: asyncio.Task | None = None
+            cls._instance._last_connect_attempt = 0.0
             cls._instance._send_lock = asyncio.Lock()
+            cls._instance._connect_lock = asyncio.Lock()
         return cls._instance
 
     @property
@@ -95,17 +101,24 @@ class OBSManager:
     async def _connect(self) -> bool:
         """Connect to OBS WebSocket and authenticate."""
         try:
-            # Cancel any existing reader from a prior connection
-            if self._reader_task and not self._reader_task.done():
-                self._reader_task.cancel()
-                self._reader_task = None
+            # Cancel any existing reader from a prior connection, and wait for it:
+            # a reader still running answers into the futures of the new socket.
+            task = self._reader_task
+            self._reader_task = None
+            if task and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
             # Preview frames can exceed the library default of 1 MiB and
             # close the socket (1009). Keep headroom for a full-scene JPEG.
-            self._ws = await websockets.connect(
+            ws = await websockets.connect(
                 settings.OBS_WS_URL, max_size=8 * 1024 * 1024,
             )
-            hello = json.loads(await self._ws.recv())
+            self._ws = ws
+            hello = json.loads(await ws.recv())
             d = hello.get("d", {})
             self._obs_version = d.get("obsWebSocketVersion", "?")
 
@@ -117,7 +130,7 @@ class OBSManager:
                 password = settings.OBS_WS_PASSWORD.strip()
                 if not password:
                     log.error("OBS WebSocket requires auth but OBS_WS_PASSWORD is empty")
-                    await self._ws.close()
+                    await ws.close()
                     self._ws = None
                     return False
                 identify["authentication"] = _compute_auth(
@@ -125,15 +138,15 @@ class OBSManager:
                     auth_info["salt"],
                     auth_info["challenge"],
                 )
-            await self._ws.send(json.dumps({"op": 1, "d": identify}))
-            ident = json.loads(await self._ws.recv())
+            await ws.send(json.dumps({"op": 1, "d": identify}))
+            ident = json.loads(await ws.recv())
             if ident.get("op") != 2:
                 log.error("OBS WebSocket auth failed: %s", ident)
-                await self._ws.close()
+                await ws.close()
                 self._ws = None
                 return False
 
-            self._reader_task = asyncio.ensure_future(self._reader_loop())
+            self._reader_task = asyncio.ensure_future(self._reader_loop(ws))
             log.info("Connected to OBS WebSocket v%s", self._obs_version)
             return True
         except Exception as e:
@@ -141,10 +154,14 @@ class OBSManager:
             self._ws = None
             return False
 
-    async def _reader_loop(self):
-        """Read websocket frames and dispatch to request futures or event handlers."""
+    async def _reader_loop(self, ws=None):
+        """Read websocket frames and dispatch to request futures or event handlers.
+
+        `ws` is the connection this reader owns. A reader that lost its socket
+        must not clear the `_ws` of a newer connection that already replaced it.
+        """
         try:
-            async for raw in self._ws:
+            async for raw in (ws or self._ws):
                 msg = json.loads(raw)
                 op = msg.get("op")
                 d = msg.get("d", {})
@@ -170,22 +187,24 @@ class OBSManager:
         except Exception as e:
             log.error("OBS reader error: %s", e)
         finally:
-            self._ws = None
-            # Cancel any pending requests
-            for future in self._pending_requests.values():
-                if not future.done():
-                    future.set_result(None)
-            self._pending_requests.clear()
+            if self._ws is ws or (ws is None and self._ws is None):
+                self._ws = None
+                # Only this reader's connection is gone, so only its callers wait.
+                for future in self._pending_requests.values():
+                    if not future.done():
+                        future.set_result(None)
+                self._pending_requests.clear()
 
     async def _request(self, req_type: str, req_data: dict | None = None) -> dict | None:
         if not self._ws:
             return None
         req_id = str(uuid.uuid4())
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        future: asyncio.Future = asyncio.get_running_loop().create_future()
         self._pending_requests[req_id] = future
         try:
+            ws = self._ws
             async with self._send_lock:
-                await self._ws.send(json.dumps({
+                await ws.send(json.dumps({
                     "op": 6,
                     "d": {"requestId": req_id, "requestType": req_type, "requestData": req_data or {}},
                 }))
@@ -204,6 +223,7 @@ class OBSManager:
         self._event_handlers = [item for item in self._event_handlers if item is not handler]
 
     async def trigger_media(self, input_name: str, action: str) -> bool:
+        await self._ensure_connected()
         resp = await self._request("TriggerMediaInputAction", {
             "inputName": input_name,
             "mediaAction": action,
@@ -212,13 +232,32 @@ class OBSManager:
 
     # -- Public API ----------------------------------------------------------
 
+    async def _ensure_connected(self) -> bool:
+        """Reconnect on demand. The playback loop only reads through here.
+
+        The UI polls also reconnect, but the cycle runs unattended overnight:
+        by then nothing else may be looking at the socket.
+        """
+        if self._ws:
+            return True
+        return await self.connect()
+
     async def connect(self) -> bool:
         """Connect and optionally create missing scenes."""
-        ok = await self._connect()
-        if ok:
-            await self._ensure_scenes()
-            await self._refresh_state()
-        return ok
+        async with self._connect_lock:
+            if self._ws:
+                return True
+            # Many callers can notice one dead socket at the same time. Do not
+            # start two handshakes: the second cancels the reader of the first.
+            now = time.monotonic()
+            if now - self._last_connect_attempt < _CONNECT_RETRY_SEC:
+                return False
+            self._last_connect_attempt = now
+            ok = await self._connect()
+            if ok:
+                await self._ensure_scenes()
+                await self._refresh_state()
+            return ok
 
     async def _ensure_scenes(self):
         """Create any missing canonical scenes in OBS."""
@@ -243,7 +282,7 @@ class OBSManager:
 
     async def switch_scene(self, scene_name: str):
         """Switch the program scene."""
-        if not self._ws:
+        if not await self._ensure_connected():
             return
         await self._request("SetCurrentProgramScene", {"sceneName": scene_name})
         self._current_scene = scene_name
@@ -338,9 +377,16 @@ class OBSManager:
 
     async def disconnect(self):
         """Close the WebSocket connection."""
-        if self._reader_task:
-            self._reader_task.cancel()
-            self._reader_task = None
+        task = self._reader_task
+        self._reader_task = None
+        if task and not task.done():
+            task.cancel()
+            # Wait for it. A reader still running can answer into the futures of
+            # the connection that a later connect() installed.
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._ws:
             try:
                 await self._ws.close()
@@ -517,18 +563,21 @@ class OBSManager:
         return bool(resp and resp.get("requestStatus", {}).get("result"))
 
     async def get_input_settings(self, input_name: str) -> dict:
+        await self._ensure_connected()
         resp = await self._request("GetInputSettings", {"inputName": input_name})
         if not resp or not resp.get("requestStatus", {}).get("result"):
             return {}
         return resp.get("responseData") or {}
 
     async def get_media_input_status(self, input_name: str) -> dict:
+        await self._ensure_connected()
         resp = await self._request("GetMediaInputStatus", {"inputName": input_name})
         if not resp or not resp.get("requestStatus", {}).get("result"):
             return {}
         return resp.get("responseData") or {}
 
     async def set_input_settings(self, input_name: str, settings: dict) -> bool:
+        await self._ensure_connected()
         resp = await self._request("SetInputSettings", {
             "inputName": input_name,
             "inputSettings": settings,

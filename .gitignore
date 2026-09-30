@@ -3,6 +3,11 @@ data.db
 *.db-journal
 cookies/
 videos/
+.acl-recovery/
+.pytest_cache/
+.pytest-tmp*/
+data.db-wal
+data.db-shm
 /assets/
 .env
 __pycache__/

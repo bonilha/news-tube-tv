@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from enum import Enum
 from pathlib import Path
 
@@ -18,6 +19,26 @@ PLAYER_SOURCE = "NewsTube Fila"
 _MEDIA_RESTART = "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_RESTART"
 _MEDIA_KINDS = {"ffmpeg_source", "vlc_source"}
 _NO_FILE = "Não há arquivo para tocar."
+_OBS_STALE = "O OBS não responde. O player da fila vai tentar reconectar."
+_STALLED = "A mídia parou de avançar no OBS. Ciclo rearmado."
+_NO_MEDIA_GRACE = 10.0
+_NO_PROGRESS_SEC = 90.0
+_BLIND_POLLS = 3
+_RETRY_WAIT_SEC = 5
+# While OBS is down, do not burn through the pass marking every video aired.
+_OBS_BACKOFF_SEC = 30
+_POLL_SEC = 1.0
+# Playing, opening, buffering. A paused media is not active: it never ends itself.
+_ACTIVE_STATES = {
+    "OBS_MEDIA_STATE_PLAYING",
+    "OBS_MEDIA_STATE_OPENING",
+    "OBS_MEDIA_STATE_BUFFERING",
+}
+_NO_MEDIA_STATES = {
+    "",
+    "OBS_MEDIA_STATE_NONE",
+    "OBS_MEDIA_STATE_EMPTY",
+}
 
 
 class _State(Enum):
@@ -140,13 +161,7 @@ class CycleManager:
                 if row_path == playing_path:
                     match_id = row.get("video_id") or ""
                     break
-        active = {
-            "OBS_MEDIA_STATE_PLAYING",
-            "OBS_MEDIA_STATE_OPENING",
-            "OBS_MEDIA_STATE_BUFFERING",
-            "OBS_MEDIA_STATE_PAUSED",
-        }
-        if match_id and state in active:
+        if match_id and state in _ACTIVE_STATES:
             on_air = match_id
         elif match_id and state == "OBS_MEDIA_STATE_ENDED":
             aired.add(match_id)
@@ -198,6 +213,14 @@ class CycleManager:
             log.exception("Lower third was not created")
 
         self._bumper_input = bumper
+        # A looping bumper never fires MediaInputPlaybackEnded. Without the event
+        # the only exit is sampling the cursor, which is not deterministic.
+        await obs_manager.set_input_settings(bumper, {"looping": False})
+        # A new run starts a new pass, not the tail of the last one.
+        self._aired = set()
+        self._tail_scanned = False
+        self._pass_items = []
+        self._current_id = ""
         if self._media_ended is None:
             self._media_ended = asyncio.Event()
         if not self._listening:
@@ -236,11 +259,32 @@ class CycleManager:
             )
             self._error = True
             return None
-        return media_items[0].get("sourceName") or ""
+        name = media_items[0].get("sourceName") or ""
+        if not name:
+            self._message = "A mídia de SCENE_BUMPER não tem nome. Recrie a fonte."
+            self._error = True
+            return None
+        return name
 
     def _start_task(self) -> None:
         if self._task is None or self._task.done():
-            self._task = asyncio.ensure_future(self._run_cycle())
+            self._task = asyncio.ensure_future(self._run_supervised())
+
+    async def _run_supervised(self) -> None:
+        """An internal error must not leave 'enabled' true with no loop behind it."""
+        while self._enabled:
+            try:
+                await self._run_cycle()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Cycle crashed; arming again in 5s")
+                self.set_message("Erro interno no ciclo. Nova tentativa automática.", error=True)
+            if not self._enabled:
+                return
+            # The cycle gave up its turn, usually no file to play. Try again on a
+            # cadence instead of spinning.
+            await asyncio.sleep(_RETRY_WAIT_SEC)
 
     def disable(self):
         """Disable the queue player. Stops the cycle if running."""
@@ -314,56 +358,97 @@ class CycleManager:
         await obs_manager.trigger_media(PLAYER_SOURCE, _MEDIA_RESTART)
         return True
 
-    async def _wait_end(self, input_name: str):
+    async def _wait_end(self, input_name: str) -> bool:
         """Wait until this media finishes. The websocket event is easy to miss.
 
         A short clip can already be ENDED on the first poll. That still counts
         after a brief grace, once a stale end from before the restart has had
         one chance to start again.
+
+        True when the media played to its end. False when it could not be
+        read or never started — the caller re-arms the bumper instead of
+        sitting on the same scene forever.
         """
+        if not input_name:
+            self.set_message("Nenhuma fonte de mídia para tocar.", error=True)
+            return False
         self._wait_input = input_name
         self._media_ended.clear()
         await obs_manager.trigger_media(input_name, _MEDIA_RESTART)
         loop = asyncio.get_running_loop()
         started = loop.time()
+        deadline = (
+            started + settings.CYCLE_MAX_WAIT_MINUTES * 60
+            if settings.CYCLE_MAX_WAIT_MINUTES > 0 else math.inf
+        )
         saw_active = False
         retried = False
         grace = 2.0
+        blind = 0
+        cursor = -1
+        duration = 0
+        progress_at = started
         while self._enabled:
             media = await obs_manager.get_media_input_status(input_name)
+            if not media:
+                # OBS is not answering: the socket died or the request failed.
+                blind += 1
+                if blind >= _BLIND_POLLS:
+                    self.set_message(_OBS_STALE, error=True)
+                    return False
+                await asyncio.sleep(_POLL_SEC)
+                continue
+            blind = 0
             state = str(media.get("mediaState") or "")
-            if state in {
-                "OBS_MEDIA_STATE_PLAYING",
-                "OBS_MEDIA_STATE_OPENING",
-                "OBS_MEDIA_STATE_BUFFERING",
-                "OBS_MEDIA_STATE_PAUSED",
-            }:
+            if state in _ACTIVE_STATES:
                 saw_active = True
-            cursor = int(media.get("mediaCursor") or 0)
-            duration = int(media.get("mediaDuration") or 0)
+            new_cursor = int(media.get("mediaCursor") or 0)
+            duration = int(media.get("mediaDuration") or 0) or duration
+            if new_cursor != cursor:
+                cursor, progress_at = new_cursor, loop.time()
             at_end = duration > 0 and cursor >= duration - 200
             ended = state in {"OBS_MEDIA_STATE_ENDED", "OBS_MEDIA_STATE_STOPPED"}
             if saw_active and (ended or at_end):
-                return
+                return True
+            # Nothing is loaded: a missing file, a deleted bumper. ENDED with no
+            # duration is the same thing, not a clip that finished.
+            if not saw_active and (state in _NO_MEDIA_STATES or (ended and duration <= 0)):
+                if loop.time() >= started + _NO_MEDIA_GRACE:
+                    self.set_message(
+                        f"A mídia '{input_name}' não abre no OBS. Verifique o arquivo.",
+                        error=True,
+                    )
+                    return False
             if not saw_active and ended and at_end and loop.time() >= started + grace:
                 if not retried:
                     retried = True
                     saw_active = False
                     started = loop.time()
+                    progress_at = started
+                    cursor = -1
                     self._media_ended.clear()
                     await obs_manager.trigger_media(input_name, _MEDIA_RESTART)
                     continue
-                return
+                return True
+            if loop.time() > deadline:
+                self.set_message(_STALLED, error=True)
+                return False
+            if saw_active and loop.time() - progress_at > _NO_PROGRESS_SEC:
+                # Paused or frozen. It is not going to finish on its own.
+                self.set_message(_STALLED, error=True)
+                return False
             if self._media_ended.is_set() and saw_active:
-                return
+                return True
             self._media_ended.clear()
             try:
-                await asyncio.wait_for(self._media_ended.wait(), timeout=1)
+                await asyncio.wait_for(self._media_ended.wait(), timeout=_POLL_SEC)
             except asyncio.TimeoutError:
                 continue
+            # A stale ended event from the previous lap is not this media's end.
             if saw_active:
-                return
+                return True
             self._media_ended.clear()
+        return False
 
     async def _load_pass(self) -> None:
         self._pass_items = _pass_rows(list(await queue_svc.get_queue_full()), set())
@@ -414,12 +499,20 @@ class CycleManager:
                 await overlay.hide()
                 queue_download.hold_player_release(True)
                 try:
-                    await self._wait_end(self._bumper_input)
+                    bumper_done = await self._wait_end(self._bumper_input)
                 finally:
                     queue_download.hold_player_release(False)
 
                 if not self._enabled:
                     return
+
+                if not bumper_done:
+                    # The bumper did not play to its end. The scene is already the
+                    # bumper, so wait a beat and arm it again instead of parking here.
+                    # With OBS down, the longer wait keeps the pass from burning videos.
+                    wait = _OBS_BACKOFF_SEC if self._message == _OBS_STALE else _RETRY_WAIT_SEC
+                    await asyncio.sleep(wait)
+                    continue
 
                 video = await self._take_next()
                 if video is None:
@@ -432,14 +525,14 @@ class CycleManager:
                         return
                     self._message = _NO_FILE
                     self._error = True
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(_RETRY_WAIT_SEC)
                     continue
                 if not _playable(video):
                     log.info("Waiting for MP4: %s", video.get("title"))
                     self._message = "Aguardando o arquivo do próximo vídeo."
                     self._error = False
                     queue_download.schedule_sync()
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(_RETRY_WAIT_SEC)
                     continue
 
                 file_path = video.get("local_path") or ""
@@ -459,19 +552,19 @@ class CycleManager:
                 self._error = False
                 await overlay.show_video(self._current_id)
                 log.info("Playing: %s (%s)", self._current_video_title, file_path)
-                await self._wait_end(PLAYER_SOURCE)
+                video_done = await self._wait_end(PLAYER_SOURCE)
                 if self._current_id:
+                    # Whether it finished or would not play, this file had its turn.
+                    # Marking it aired is what stops the loop from replaying it now.
                     self._aired.add(self._current_id)
-                    await queue_svc.rotate_video_to_end(self._current_id)
+                    if video_done:
+                        await queue_svc.rotate_video_to_end(self._current_id)
                 self._current_id = ""
                 self._protect()
                 self._publish_keep_skip()
                 await overlay.hide()
                 played_any = True
 
-        except Exception as exc:
-            if exc.__class__.__name__ != "CancelledError":
-                log.exception("Cycle error")
         finally:
             self._state = _State.STOPPED
             self._current_video_title = ""

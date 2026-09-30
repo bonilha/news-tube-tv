@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -14,6 +15,9 @@ from app.database import get_db
 from app.queue import cookies as yt_cookies
 
 log = logging.getLogger(__name__)
+
+# A YouTube video id. Anything else on disk is not ours to delete.
+_VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
 
 # Probed once at startup, in this order. Each encoder can try more than one arg set.
 _ENCODERS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
@@ -227,6 +231,9 @@ def files_outside_keep(directory: Path, keep: set[str]) -> list[Path]:
         if not path.is_file():
             continue
         video_id = path.name.split(".", 1)[0]
+        if not _VIDEO_ID.fullmatch(video_id):
+            # A bumper, an art file, anything the queue never put here.
+            continue
         if video_id not in keep:
             doomed.append(path)
             continue
@@ -616,6 +623,10 @@ def _try_unlink(path: Path, *, locked_message: bool = False) -> bool:
     return True
 
 
+# yt-dlp names a merged file after the video id. Fragments carry .f<itag>. before it.
+_MERGED_SUFFIXES = (".mp4", ".webm", ".mkv", ".m4v", ".mov")
+
+
 def raw_download(video_id: str) -> Path | None:
     """Finished yt-dlp file for this id. Partial fragments do not count."""
     directory = downloads_dir()
@@ -629,9 +640,11 @@ def raw_download(video_id: str) -> Path | None:
         and ".part" not in path.name
         and ".encode." not in path.name
     ]
-    merged = [path for path in finished if path.name == f"{video_id}.mp4"]
-    if merged:
-        return merged[0]
+    by_name = {path.name: path for path in finished}
+    for suffix in _MERGED_SUFFIXES:
+        path = by_name.get(f"{video_id}{suffix}")
+        if path is not None:
+            return path
     return None
 
 

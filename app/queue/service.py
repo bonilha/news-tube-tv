@@ -295,7 +295,12 @@ async def _run_maintenance(key: str, factory: Callable[[], Awaitable[dict]]) -> 
                 task = current[1]
                 break
             other = current[1]
-        await other
+        try:
+            await other
+        except Exception:
+            # Another scan failed. That is not this call's failure; loop and
+            # start our own run instead of sharing their error.
+            pass
     return await task
 
 
