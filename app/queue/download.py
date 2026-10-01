@@ -454,13 +454,10 @@ async def _download_keep(keep: list[str]) -> None:
             log.exception("Download failed for %s", video_id)
             text = str(exc)
             if yt_cookies.looks_like_cookie_failure(text):
-                yt_cookies.mark_rejected(
-                    "O YouTube recusou os cookies durante o download. "
-                    "Atualize o arquivo em cookies. Os vídeos não serão baixados."
-                )
-                await _store_error(video_id, "Cookies do YouTube recusados")
-                await remove_files(_leftovers(video_id))
-                return
+                # One video's 403 is not proof the cookies are dead. Age gates,
+                # private videos and geo blocks answer the same way. Re-probe on
+                # the next sync and only check_cookies may reject them outright.
+                yt_cookies.invalidate()
             await _store_error(video_id, text[:300])
             await remove_files(_leftovers(video_id))
             continue
@@ -820,9 +817,15 @@ async def _queue_rows() -> list[dict]:
 
 
 async def _forget_paths_outside(keep: set[str]) -> None:
+    """Forget the file path of videos outside the window. Their error stays.
+
+    Clearing download_error here is what parked the cycle: the failed video
+    lost its block, became downloadable again, was picked as next in play order,
+    and the player waited 5s by 5s for a file that had just failed.
+    """
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT video_id, local_path FROM queue WHERE local_path != '' OR download_error != ''"
+            "SELECT video_id, local_path FROM queue WHERE local_path != ''"
         )
         rows = await cursor.fetchall()
         for row in rows:
@@ -832,10 +835,36 @@ async def _forget_paths_outside(keep: set[str]) -> None:
             if path is not None:
                 await remove_files([path])
             await db.execute(
-                "UPDATE queue SET local_path = '', download_error = '' WHERE video_id = ?",
+                "UPDATE queue SET local_path = '' WHERE video_id = ?",
                 (row["video_id"],),
             )
         await db.commit()
+
+
+async def retry_error_videos() -> int:
+    """Clear download errors so videos whose turn came round are tried again.
+
+    Called when the queue wraps. A row is retried only when the error is the
+    one thing blocking it — a stale or over-long video keeps its block.
+    """
+    rows = await _queue_rows()
+    ready = [
+        row["video_id"] for row in rows
+        if row.get("download_error")
+        and not download_blocked({**row, "download_error": ""})
+    ]
+    if not ready:
+        return 0
+    async with get_db() as db:
+        for video_id in ready:
+            await db.execute(
+                "UPDATE queue SET download_error = '' WHERE video_id = ?",
+                (video_id,),
+            )
+        await db.commit()
+    log.info("Retrying %d videos whose turn came round again", len(ready))
+    schedule_sync()
+    return len(ready)
 
 
 async def _store_path(video_id: str, path: Path) -> None:

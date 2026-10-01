@@ -10,6 +10,7 @@ from pathlib import Path
 from app.config import settings
 from app.obs.manager import SCENE_BUMPER, SCENE_PROGRAM, obs_manager
 from app.overlay import service as overlay
+from app.queue import cookies as yt_cookies
 from app.queue import download as queue_download
 from app.queue import service as queue_svc
 
@@ -25,6 +26,8 @@ _NO_MEDIA_GRACE = 10.0
 _NO_PROGRESS_SEC = 90.0
 _BLIND_POLLS = 3
 _RETRY_WAIT_SEC = 5
+# With this many videos ready to air, a missing MP4 is skipped, not waited on.
+_SKIP_READY_FLOOR = 3
 # While OBS is down, do not burn through the pass marking every video aired.
 _OBS_BACKOFF_SEC = 30
 _POLL_SEC = 1.0
@@ -102,6 +105,8 @@ class CycleManager:
             cls._instance._current_id = ""
             cls._instance._aired = set()
             cls._instance._tail_scanned = False
+            cls._instance._ready_count = 0
+            cls._instance._retry_all_errors = False
             cls._instance._error = False
             cls._instance._listening = False
         return cls._instance
@@ -173,6 +178,15 @@ class CycleManager:
         self._message = message
         self._error = error
 
+    def _blocked_reason(self) -> str:
+        """Why no MP4 is arriving, for the operator message. '' when unclear."""
+        cookie = yt_cookies.status()
+        if not cookie["ok"] and cookie["message"]:
+            return cookie["message"]
+        if not queue_download.selected_encoder():
+            return "Nenhum codificador H.264 encontrado para o yt-dlp."
+        return ""
+
     def _protect(self) -> None:
         """Video ids still needed in this pass, including the one on air."""
         ids = {row["video_id"] for row in self._pass_items if row.get("video_id")}
@@ -219,6 +233,8 @@ class CycleManager:
         # A new run starts a new pass, not the tail of the last one.
         self._aired = set()
         self._tail_scanned = False
+        self._retry_all_errors = False
+        self._ready_count = 0
         self._pass_items = []
         self._current_id = ""
         if self._media_ended is None:
@@ -478,10 +494,12 @@ class CycleManager:
             self._aired = set()
             self._tail_scanned = False
             self._publish_keep_skip()
+            await queue_download.retry_error_videos()
             rows = await queue_svc.get_queue_full()
             video, _wrapped = next_in_pass(rows, self._aired)
             unplayed = _pass_rows(rows, set())
         self._pass_items = unplayed
+        self._ready_count = sum(1 for row in unplayed if _playable(row))
         self._protect()
         return video
 
@@ -519,18 +537,34 @@ class CycleManager:
                     if not self._enabled:
                         return
                     if not played_any:
-                        self._message = _NO_FILE
+                        self._message = self._blocked_reason() or _NO_FILE
                         self._error = True
                         log.info("No MP4 available — stopping cycle")
                         return
-                    self._message = _NO_FILE
+                    self._message = self._blocked_reason() or _NO_FILE
                     self._error = True
+                    if not self._retry_all_errors:
+                        self._retry_all_errors = True
+                        await queue_download.retry_error_videos()
                     await asyncio.sleep(_RETRY_WAIT_SEC)
                     continue
                 if not _playable(video):
+                    # A video whose download failed must not park the broadcast.
+                    # With at least one file ready, and the buffer down this far,
+                    # take its turn and leave the missing one for the next lap.
+                    if self._ready_count >= 1 and self._ready_count <= _SKIP_READY_FLOOR and played_any:
+                        skip_id = video.get("video_id") or ""
+                        log.info("Skipping %s: no MP4, %d ready", skip_id, self._ready_count)
+                        self.set_message(f"Pulei {video.get('title') or skip_id}: sem MP4.")
+                        if skip_id:
+                            self._aired.add(skip_id)
+                        self._publish_keep_skip()
+                        continue
                     log.info("Waiting for MP4: %s", video.get("title"))
-                    self._message = "Aguardando o arquivo do próximo vídeo."
-                    self._error = False
+                    self.set_message(
+                        "Aguardando o arquivo do próximo vídeo. "
+                        + self._blocked_reason()
+                    )
                     queue_download.schedule_sync()
                     await asyncio.sleep(_RETRY_WAIT_SEC)
                     continue

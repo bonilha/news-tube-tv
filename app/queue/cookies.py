@@ -52,6 +52,16 @@ def mark_rejected(message: str) -> None:
     log.error("YouTube cookies rejected: %s", message)
 
 
+def invalidate() -> None:
+    """Drop the cached verdict so the next sync re-runs the probe.
+
+    A single video failing with 403 is not proof the cookies are dead. Only
+    check_cookies decides that; this just makes the decision a fresh one.
+    """
+    global _checked_at
+    _checked_at = 0.0
+
+
 def check_cookies() -> bool:
     """Convert the cookie file and ask yt-dlp for one video without downloading it."""
     global _ok, _message, _checked_at, _source_mtime, _netscape_path

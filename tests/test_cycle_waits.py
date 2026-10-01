@@ -63,6 +63,12 @@ class FakeDownload:
     def download_blocked(self, row):
         return False
 
+    def selected_encoder(self):
+        return "libx264"
+
+    async def retry_error_videos(self):
+        return 0
+
 
 class FakeQueue:
     def __init__(self, rows=()):
