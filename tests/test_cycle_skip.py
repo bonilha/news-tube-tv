@@ -1,8 +1,8 @@
-"""A video with no MP4 must not park the broadcast in the bumper forever.
+"""A video that is not ready must not stop the broadcast.
 
-Rule: while waiting, if the queue is down to three or fewer ready files and the
-pass already aired something, skip the missing one. At startup, and while the
-buffer is healthy, keep waiting for the download.
+The wait is half the duration of MP4s already downloaded and not on air.
+After that, or as soon as the row has a download error, skip it and play the
+next file. With nothing else downloaded, stay on the bumper.
 """
 
 import asyncio
@@ -128,6 +128,8 @@ def mgr(monkeypatch):
     manager._current_id = ""
     manager._ready_count = 0
     manager._retry_all_errors = False
+    manager._wait_budget = 0.0
+    manager._unready_since = {}
     manager._message = ""
     manager._error = False
     manager._media_ended = asyncio.Event()
@@ -172,13 +174,38 @@ def run_cycle(mgr, monkeypatch, rows, statuses, stop_after, seconds=5.0):
     return obs
 
 
-def test_thin_buffer_skips_the_video_without_a_file(mgr, monkeypatch):
-    # 'first' airs, so the pass has begun. Then the head has no file and only
-    # one video is left ready: skip it and keep broadcasting.
+def _expire_the_deadline(monkeypatch):
+    """Each clock read jumps past any half-buffer deadline in these tests."""
+    step = {"n": 0}
+
+    def _now():
+        step["n"] += 1
+        return step["n"] * 10_000
+
+    monkeypatch.setattr(cycle_mod, "_now", _now)
+
+
+def test_deadline_skips_and_keeps_playing(mgr, monkeypatch):
+    _expire_the_deadline(monkeypatch)
     rows = [_row("first", 1, True), _row("broken", 2, False), _row("second", 3, True)]
     obs = run_cycle(mgr, monkeypatch, rows, [_PLAYING, _ENDED], stop_after=6)
     assert "broken" in mgr._aired
     assert obs.switched.count(SCENE_PROGRAM) >= 2
+
+
+def test_full_buffer_also_skips_once_the_deadline_passes(mgr, monkeypatch):
+    _expire_the_deadline(monkeypatch)
+    rows = [
+        _row("broken", 1, False),
+        _row("a", 2, True),
+        _row("b", 3, True),
+        _row("c", 4, True),
+        _row("d", 5, True),
+        _row("e", 6, True),
+    ]
+    obs = run_cycle(mgr, monkeypatch, rows, [_PLAYING, _ENDED], stop_after=4)
+    assert "broken" in mgr._aired
+    assert obs.switched.count(SCENE_PROGRAM) >= 1
 
 
 def test_cold_start_waits_instead_of_burning_the_pass(mgr, monkeypatch):
@@ -202,6 +229,17 @@ def test_healthy_buffer_waits_for_the_download(mgr, monkeypatch):
     run_cycle(mgr, monkeypatch, rows, [_PLAYING, _ENDED], stop_after=6)
     assert "broken" not in mgr._aired
     assert "Aguardando" in mgr._message
+
+
+def test_download_error_skips_without_waiting(mgr, monkeypatch):
+    rows = [
+        _row("broken", 1, False),
+        _row("second", 2, True),
+    ]
+    rows[0]["download_error"] = "yt-dlp failed"
+    obs = run_cycle(mgr, monkeypatch, rows, [_PLAYING, _ENDED], stop_after=4)
+    assert "broken" in mgr._aired
+    assert obs.switched.count(SCENE_PROGRAM) >= 1
 
 
 def test_no_ready_file_says_why_nothing_is_downloading(mgr, monkeypatch):

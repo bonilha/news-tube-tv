@@ -37,7 +37,7 @@ _ENCODERS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
 )
 # A stalled YouTube connection must not hold the download lock until the process dies.
 _SOCKET_TIMEOUT_SEC = 30
-_DOWNLOAD_TIMEOUT_SEC = 45 * 60
+_LATE = "Não ficou pronto no prazo da fila"
 
 
 def downloads_dir() -> Path:
@@ -73,6 +73,8 @@ _skip_keep: set[str] = set()
 # File OBS is playing. Kept on disk and not counted inside the five.
 _on_air_id: str = ""
 _stuck_deletes: set[str] = set()
+# Ids whose deadline already fired. The worker must not publish a late file.
+_abandoned: set[str] = set()
 _PLAYER_SOURCE = "NewsTube Fila"
 _MEDIA_STOP = "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP"
 
@@ -99,6 +101,28 @@ def note_on_air(video_id: str) -> None:
     """The file OBS is playing stays on disk and does not use a window slot."""
     global _on_air_id
     _on_air_id = video_id or ""
+
+
+def ready_wait_seconds(rows: list[dict], on_air_id: str = "", is_ready=None) -> float:
+    """Half the duration of MP4s that are ready and not on air.
+
+    `duration` is seconds. The video on air does not count. A row without a
+    file does not count. Zero means there is nothing downloaded to spend
+    waiting, so the caller must not arm a zero-second download cap.
+    """
+    if is_ready is None:
+        def is_ready(row):
+            path = row.get("local_path") or ""
+            return bool(path) and Path(path).is_file()
+    total = 0
+    for row in rows:
+        video_id = row.get("video_id") or ""
+        if not video_id or video_id == (on_air_id or ""):
+            continue
+        if not is_ready(row):
+            continue
+        total += max(0, int(row.get("duration") or 0))
+    return total / 2
 
 
 def selected_encoder() -> str | None:
@@ -439,15 +463,14 @@ async def _download_keep(keep: list[str]) -> None:
                 settings.QUEUE_MIN_FREE_MB, video_id,
             )
             break
+        budget = ready_wait_seconds(await _queue_rows(), _on_air_id)
         try:
-            await asyncio.wait_for(
-                asyncio.to_thread(_download_mp4, video_id),
-                timeout=_DOWNLOAD_TIMEOUT_SEC,
-            )
+            await _run_download(video_id, budget)
         except TimeoutError:
-            log.error("Download timed out for %s", video_id)
+            log.error("Download missed the queue deadline for %s", video_id)
+            _abandoned.add(video_id)
             _kill_media_tools()
-            await _store_error(video_id, "Download passou do tempo e foi interrompido")
+            await _store_error(video_id, _LATE)
             await remove_files(_leftovers(video_id))
             continue
         except Exception as exc:
@@ -652,7 +675,7 @@ def _run_ffmpeg(source: Path, dest: Path, args: list[str]) -> None:
         "-i", str(source), *args, str(dest),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=_DOWNLOAD_TIMEOUT_SEC)
+        result = subprocess.run(cmd, capture_output=True)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"ffmpeg failed: {exc}") from exc
     if result.returncode != 0 or not dest.exists() or dest.stat().st_size <= 0:
@@ -663,6 +686,8 @@ def _run_ffmpeg(source: Path, dest: Path, args: list[str]) -> None:
 
 def _place_in_queue(video_id: str) -> None:
     """Move or encode the downloaded file into videos/queue. Runs after yt-dlp."""
+    if video_id in _abandoned:
+        return
     source = raw_download(video_id)
     if source is None:
         raise RuntimeError("yt-dlp did not leave a finished file in downloads")
@@ -704,6 +729,8 @@ def _place_in_queue(video_id: str) -> None:
             raise RuntimeError(f"no H.264 encoder for codec {video_codec or 'unknown'}")
         log.info("Encode video to H.264 because codec is %s: %s", video_codec, video_id)
         args = ["-c:v", _encoder, *_encoder_args, "-c:a", "aac", "-b:a", "160k"]
+    if video_id in _abandoned:
+        return
     temp = downloads_dir() / f"{video_id}.encode.mp4"
     if temp.exists():
         temp.unlink()
@@ -711,6 +738,19 @@ def _place_in_queue(video_id: str) -> None:
     temp.replace(final)
     if source.exists() and source.resolve() != final.resolve():
         source.unlink()
+
+
+async def _run_download(video_id: str, budget: float) -> None:
+    """Download one id. A positive budget is the deadline; zero waits it out.
+
+    Zero is an empty buffer. Capping that at zero seconds would stop the queue
+    from ever filling. A stuck socket still dies via yt-dlp's socket timeout.
+    """
+    _abandoned.discard(video_id)
+    if budget > 0:
+        await asyncio.wait_for(asyncio.to_thread(_download_mp4, video_id), timeout=budget)
+        return
+    await asyncio.to_thread(_download_mp4, video_id)
 
 
 def _download_mp4(video_id: str) -> None:
@@ -743,6 +783,8 @@ def _download_mp4(video_id: str) -> None:
     url = f"https://www.youtube.com/watch?v={video_id}"
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
+    if video_id in _abandoned:
+        return
     # yt-dlp moves the file to the outtmpl after its own postprocessors.
     # Placing it in queue has to happen after that, or it is moved back.
     _place_in_queue(video_id)

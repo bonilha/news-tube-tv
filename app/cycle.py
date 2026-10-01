@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import time
 from enum import Enum
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from app.obs.manager import SCENE_BUMPER, SCENE_PROGRAM, obs_manager
 from app.overlay import service as overlay
 from app.queue import cookies as yt_cookies
 from app.queue import download as queue_download
+from app.queue.download import ready_wait_seconds
 from app.queue import service as queue_svc
 
 log = logging.getLogger(__name__)
@@ -26,8 +28,6 @@ _NO_MEDIA_GRACE = 10.0
 _NO_PROGRESS_SEC = 90.0
 _BLIND_POLLS = 3
 _RETRY_WAIT_SEC = 5
-# With this many videos ready to air, a missing MP4 is skipped, not waited on.
-_SKIP_READY_FLOOR = 3
 # While OBS is down, do not burn through the pass marking every video aired.
 _OBS_BACKOFF_SEC = 30
 _POLL_SEC = 1.0
@@ -80,6 +80,10 @@ def next_in_pass(rows: list[dict], aired: set[str]) -> tuple[dict | None, bool]:
     return lap[0], True
 
 
+def _now() -> float:
+    return time.monotonic()
+
+
 def tail_scan_due(unplayed: int, limit: int, already: bool) -> bool:
     """One channel scan when this pass has limit videos left, or fewer."""
     return unplayed > 0 and limit > 0 and unplayed <= limit and not already
@@ -108,6 +112,8 @@ class CycleManager:
             cls._instance._ready_count = 0
             cls._instance._retry_all_errors = False
             cls._instance._error = False
+            cls._instance._wait_budget = 0.0
+            cls._instance._unready_since = {}
             cls._instance._listening = False
         return cls._instance
 
@@ -235,6 +241,8 @@ class CycleManager:
         self._tail_scanned = False
         self._retry_all_errors = False
         self._ready_count = 0
+        self._wait_budget = 0.0
+        self._unready_since = {}
         self._pass_items = []
         self._current_id = ""
         if self._media_ended is None:
@@ -471,6 +479,18 @@ class CycleManager:
         self._current_id = ""
         self._protect()
 
+    def _unready_expired(self, video_id: str) -> bool:
+        """True once this id has used up half the ready buffer."""
+        budget = self._wait_budget
+        if budget <= 0 or not video_id:
+            return False
+        now = _now()
+        started = self._unready_since.get(video_id)
+        if started is None:
+            self._unready_since[video_id] = now
+            return False
+        return now - started >= budget
+
     async def _take_next(self) -> dict | None:
         """First video that has not aired this pass. Waits on a missing MP4.
 
@@ -500,13 +520,13 @@ class CycleManager:
             unplayed = _pass_rows(rows, set())
         self._pass_items = unplayed
         self._ready_count = sum(1 for row in unplayed if _playable(row))
+        self._wait_budget = ready_wait_seconds(rows, self._current_id, _playable)
         self._protect()
         return video
 
     async def _run_cycle(self):
         """Main loop: bumper → video → bumper → ..."""
         log.info("Cycle started")
-        played_any = False
         try:
             await self._load_pass()
             while self._enabled:
@@ -536,28 +556,27 @@ class CycleManager:
                 if video is None:
                     if not self._enabled:
                         return
-                    if not played_any:
-                        self._message = self._blocked_reason() or _NO_FILE
-                        self._error = True
-                        log.info("No MP4 available — stopping cycle")
-                        return
                     self._message = self._blocked_reason() or _NO_FILE
                     self._error = True
+                    log.info("No MP4 available — staying on the bumper")
                     if not self._retry_all_errors:
                         self._retry_all_errors = True
                         await queue_download.retry_error_videos()
                     await asyncio.sleep(_RETRY_WAIT_SEC)
                     continue
                 if not _playable(video):
-                    # A video whose download failed must not park the broadcast.
-                    # With at least one file ready, and the buffer down this far,
-                    # take its turn and leave the missing one for the next lap.
-                    if self._ready_count >= 1 and self._ready_count <= _SKIP_READY_FLOOR and played_any:
-                        skip_id = video.get("video_id") or ""
-                        log.info("Skipping %s: no MP4, %d ready", skip_id, self._ready_count)
-                        self.set_message(f"Pulei {video.get('title') or skip_id}: sem MP4.")
+                    skip_id = video.get("video_id") or ""
+                    # A known failure skips at once. Otherwise the wait is half
+                    # the ready buffer. An empty buffer is not a reason to burn
+                    # the pass: the download is still allowed to finish.
+                    if video.get("download_error") or self._unready_expired(skip_id):
+                        log.info("Skipping %s: not ready in time", skip_id)
+                        self.set_message(
+                            f"Pulei {video.get('title') or skip_id}: não ficou pronto a tempo."
+                        )
                         if skip_id:
                             self._aired.add(skip_id)
+                            self._unready_since.pop(skip_id, None)
                         self._publish_keep_skip()
                         continue
                     log.info("Waiting for MP4: %s", video.get("title"))
@@ -574,19 +593,26 @@ class CycleManager:
                 self._protect()
                 self._publish_keep_skip()
                 await queue_svc.mark_status_by_video_id(self._current_id, "playing")
-                await obs_manager.set_input_settings(PLAYER_SOURCE, {
-                    "is_local_file": True,
-                    "local_file": file_path,
-                    "looping": False,
-                })
-                await obs_manager.switch_scene(SCENE_PROGRAM)
-                self._state = _State.VIDEO
-                self._current_video_title = video.get("title") or ""
-                self._message = ""
-                self._error = False
-                await overlay.show_video(self._current_id)
-                log.info("Playing: %s (%s)", self._current_video_title, file_path)
-                video_done = await self._wait_end(PLAYER_SOURCE)
+                try:
+                    await obs_manager.set_input_settings(PLAYER_SOURCE, {
+                        "is_local_file": True,
+                        "local_file": file_path,
+                        "looping": False,
+                    })
+                    await obs_manager.switch_scene(SCENE_PROGRAM)
+                    self._state = _State.VIDEO
+                    self._current_video_title = video.get("title") or ""
+                    self._message = ""
+                    self._error = False
+                    await overlay.show_video(self._current_id)
+                    log.info("Playing: %s (%s)", self._current_video_title, file_path)
+                    video_done = await self._wait_end(PLAYER_SOURCE)
+                except Exception:
+                    log.exception("Could not play %s", self._current_id)
+                    self.set_message(
+                        f"Pulei {self._current_video_title or self._current_id}: o OBS não abriu o arquivo."
+                    )
+                    video_done = False
                 if self._current_id:
                     # Whether it finished or would not play, this file had its turn.
                     # Marking it aired is what stops the loop from replaying it now.
@@ -597,7 +623,6 @@ class CycleManager:
                 self._protect()
                 self._publish_keep_skip()
                 await overlay.hide()
-                played_any = True
 
         finally:
             self._state = _State.STOPPED
