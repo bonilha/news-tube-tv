@@ -247,23 +247,26 @@ async def reset_played_to_pending() -> int:
 
 
 async def clear_queue_and_rescan() -> dict:
-    """Delete every queue row and its files, then scan the channels again."""
-    async with get_db() as db:
-        cursor = await db.execute("SELECT video_id, local_path FROM queue")
-        rows = [dict(row) for row in await cursor.fetchall()]
-        await db.execute("DELETE FROM queue")
-        await db.commit()
-    queue_download.protect_video_ids(set())
-    for row in rows:
-        await queue_download.discard_video_files(row["video_id"], row["local_path"] or "")
-    stats = await scan_all_channels()
-    stats["expired"] = await expire_old_videos()
-    stats["cleared"] = len(rows)
-    # Scan inserts play_order 0, so the table would show oldest-first and a
-    # 720p can lead. Shuffle before the download window is filled.
-    stats["shuffled"] = await shuffle_play_order(reset_files=False)
-    queue_download.schedule_sync()
-    return stats
+    """Delete every queue row and its files, then scan and shuffle before downloads."""
+    queue_download.hold_downloads()
+    try:
+        async with get_db() as db:
+            cursor = await db.execute("SELECT video_id, local_path FROM queue")
+            rows = [dict(row) for row in await cursor.fetchall()]
+            await db.execute("DELETE FROM queue")
+            await db.commit()
+        queue_download.protect_video_ids(set())
+        for row in rows:
+            await queue_download.discard_video_files(row["video_id"], row["local_path"] or "")
+        stats = await scan_all_channels()
+        stats["expired"] = await expire_old_videos()
+        stats["cleared"] = len(rows)
+        # Scan inserts play_order 0, so the table would show oldest-first and a
+        # 720p can lead. Shuffle before the download window is filled.
+        stats["shuffled"] = await shuffle_play_order(reset_files=False)
+        return stats
+    finally:
+        queue_download.release_downloads()
 
 
 async def remove_from_queue(queue_id: int) -> bool:
@@ -377,11 +380,21 @@ async def broadcast_ready() -> bool:
 
 
 async def startup_broadcast_queue() -> dict[str, int]:
-    """Scan, shuffle once, drop leftover MP4s, then download the new order."""
-    stats = await scan_all_channels()
-    stats["expired"] = await expire_old_videos()
-    stats["shuffled"] = await shuffle_play_order(reset_files=True)
-    return stats
+    """Wipe MP4s, scan, shuffle, and only then download the new order.
+
+    Lifespan may already be holding the window so the buffer loop cannot fill
+    it before this task runs. One release opens it, after the shuffle.
+    """
+    if not queue_download.downloads_held():
+        queue_download.hold_downloads()
+    try:
+        await queue_download.discard_all_downloads()
+        stats = await scan_all_channels()
+        stats["expired"] = await expire_old_videos()
+        stats["shuffled"] = await shuffle_play_order(reset_files=False)
+        return stats
+    finally:
+        queue_download.release_downloads()
 
 
 _LOW_RES_HEIGHT = 720
@@ -493,7 +506,6 @@ async def shuffle_play_order(*, reset_files: bool = False) -> int:
         await db.commit()
     if reset_files:
         await queue_download.discard_all_downloads()
-        queue_download.schedule_sync()
     return len(rows)
 
 

@@ -75,6 +75,7 @@ async def queue_table(request: Request, _auth: bool = Depends(verify_credentials
 @router.post("/queue/shuffle", response_class=HTMLResponse)
 async def shuffle_queue(request: Request, _auth: bool = Depends(verify_credentials)):
     await queue_svc.shuffle_play_order(reset_files=True)
+    queue_download.schedule_sync()
     items = await queue_svc.get_queue_full()
     return _html(request, "partials/queue_table.html", await _queue_ctx({"items": items}))
 

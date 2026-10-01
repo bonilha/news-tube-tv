@@ -64,6 +64,10 @@ _encoder_label: str = ""
 _lock = asyncio.Lock()
 _task: asyncio.Task | None = None
 _dirty = False
+# Closed while startup or "Apagar fila e escanear" cleans, scans, and shuffles.
+_download_hold = 0
+# Id inside yt-dlp. A new hold abandons it so the next id does not start.
+_current_download = ""
 
 _KEEP_STATUSES = ("playing", "pending")
 _protected_ids: set[str] = set()
@@ -296,14 +300,45 @@ def _kill_media_tools() -> None:
         log.warning("Could not stop child ffmpeg processes")
 
 
+def downloads_held() -> bool:
+    """True while the queue is still being cleaned, scanned, or shuffled."""
+    return _download_hold > 0
+
+
+def hold_downloads() -> None:
+    """Stop the five-video window until release_downloads()."""
+    global _download_hold
+    _download_hold += 1
+    if _current_download:
+        _abandoned.add(_current_download)
+        _kill_media_tools()
+
+
+def release_downloads() -> None:
+    """Open the window. The last release is the one that may download."""
+    global _download_hold
+    if _download_hold <= 0:
+        _download_hold = 0
+        return
+    _download_hold -= 1
+    if _download_hold == 0:
+        schedule_sync()
+
+
 def schedule_sync() -> None:
-    """Run a download sync soon. Overlapping calls share one follow-up pass."""
+    """Run a download sync soon. Overlapping calls share one follow-up pass.
+
+    While the queue is being scanned and shuffled this only remembers the
+    request. release_downloads() starts it after the new order exists.
+    """
     global _dirty, _task
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return
     _dirty = True
+    if downloads_held():
+        return
     if _task is None or _task.done():
         _task = loop.create_task(_sync_loop())
 
@@ -408,8 +443,12 @@ def needs_video_scale(video_codec: str, width: int, height: int, target: tuple[i
 
 async def sync_downloads() -> None:
     """Download missing MP4s for the keep window and delete every other file."""
+    if downloads_held():
+        return
     ensure_video_dirs()
     await purge_expired()
+    if downloads_held():
+        return
     rows = await _queue_rows()
     await _clear_missing_paths(rows)
     await _clear_finishable_errors(rows)
@@ -423,6 +462,8 @@ async def sync_downloads() -> None:
     else:
         await _download_keep(keep)
 
+    if downloads_held():
+        return
     await _forget_paths_outside(keep_set)
     doomed: list[Path] = []
     for directory in (downloads_dir(), queue_dir(), settings.VIDEOS_DIR):
@@ -432,7 +473,10 @@ async def sync_downloads() -> None:
 
 async def _download_keep(keep: list[str]) -> None:
     """Download MP4s for the window. Missing files do not keep other ids on disk."""
+    global _current_download
     for video_id in keep:
+        if downloads_held():
+            return
         final = queue_file(video_id)
         legacy = settings.VIDEOS_DIR / f"{video_id}.mp4"
         if not final.exists() and legacy.is_file():
@@ -464,6 +508,7 @@ async def _download_keep(keep: list[str]) -> None:
             )
             break
         budget = ready_wait_seconds(await _queue_rows(), _on_air_id)
+        _current_download = video_id
         try:
             await _run_download(video_id, budget)
         except TimeoutError:
@@ -474,6 +519,9 @@ async def _download_keep(keep: list[str]) -> None:
             await remove_files(_leftovers(video_id))
             continue
         except Exception as exc:
+            if downloads_held() or video_id in _abandoned:
+                log.info("Download stopped until the queue is shuffled: %s", video_id)
+                return
             log.exception("Download failed for %s", video_id)
             text = str(exc)
             if yt_cookies.looks_like_cookie_failure(text):
@@ -484,6 +532,9 @@ async def _download_keep(keep: list[str]) -> None:
             await _store_error(video_id, text[:300])
             await remove_files(_leftovers(video_id))
             continue
+        finally:
+            if _current_download == video_id:
+                _current_download = ""
         current = await _one_row(video_id)
         if current is None or not _downloadable(current):
             await remove_files(_leftovers(video_id))
@@ -780,6 +831,12 @@ def _download_mp4(video_id: str) -> None:
     if cookiefile is None:
         raise RuntimeError("YouTube cookies are not valid")
     opts["cookiefile"] = str(cookiefile)
+
+    def _stop_when_held(_status: dict) -> None:
+        if _download_hold > 0 or video_id in _abandoned:
+            raise yt_dlp.utils.DownloadCancelled("fila ainda não randomizada")
+
+    opts["progress_hooks"] = [_stop_when_held]
     url = f"https://www.youtube.com/watch?v={video_id}"
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])

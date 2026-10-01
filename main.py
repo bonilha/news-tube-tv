@@ -72,6 +72,8 @@ async def lifespan(app: FastAPI):
         await ensure_overlay()
     except Exception:
         log.exception("Lower third was not created")
+    # Closed until startup_broadcast_queue finishes the scan and the shuffle.
+    queue_download.hold_downloads()
     refresh = asyncio.create_task(_queue_refresh_loop())
     buffer = asyncio.create_task(_queue_buffer_loop())
     yield
