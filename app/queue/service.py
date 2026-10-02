@@ -400,26 +400,40 @@ async def startup_broadcast_queue() -> dict[str, int]:
 _LOW_RES_HEIGHT = 720
 
 
-def shuffle_ids(rows: list[tuple[int, int, int]], head: int) -> list[int]:
+def shuffle_ids(rows: list[tuple[int, int, int, int]], head: int) -> list[int]:
     """Queue ids with the same channel apart, and low resolution after `head`.
 
-    Each row is (queue id, channel id, max height). A known height of 720 or
-    less follows every taller or unknown video, so the first `head` positions
-    stay clear of it when enough taller videos exist. Each group is spread on
-    its own.
+    Each row is (queue id, channel id, max height, play count). A known height
+    of 720 or less follows every taller or unknown video, so the first `head`
+    positions stay clear of it when enough taller videos exist. Inside each of
+    those groups, never-aired videos come first, then one play, then two, and
+    so on. Each play-count band is spread on its own.
     """
     del head  # the split is the whole taller group, which covers the first N
+
+    def band(selected: list[tuple[int, int, int]]) -> list[int]:
+        counts = sorted({play_count for _queue_id, _channel_id, play_count in selected})
+        ordered: list[int] = []
+        for play_count in counts:
+            group = [
+                (queue_id, channel_id)
+                for queue_id, channel_id, count in selected
+                if count == play_count
+            ]
+            ordered.extend(spread_play_order(group))
+        return ordered
+
     low = [
-        (queue_id, channel_id)
-        for queue_id, channel_id, height in rows
+        (queue_id, channel_id, int(play_count))
+        for queue_id, channel_id, height, play_count in rows
         if 0 < int(height) <= _LOW_RES_HEIGHT
     ]
     taller = [
-        (queue_id, channel_id)
-        for queue_id, channel_id, height in rows
+        (queue_id, channel_id, int(play_count))
+        for queue_id, channel_id, height, play_count in rows
         if not (0 < int(height) <= _LOW_RES_HEIGHT)
     ]
-    return spread_play_order(taller) + spread_play_order(low)
+    return band(taller) + band(low)
 
 
 def spread_play_order(rows: list[tuple[int, int]]) -> list[int]:
@@ -493,9 +507,16 @@ def _insert_channel(sequence: list[int], channel_id: int, extra: int) -> list[in
 async def shuffle_play_order(*, reset_files: bool = False) -> int:
     """Shuffle play_order for all queue items. Returns count of items shuffled."""
     async with get_db() as db:
-        cursor = await db.execute("SELECT id, channel_id, max_height FROM queue")
+        cursor = await db.execute(
+            "SELECT id, channel_id, max_height, play_count FROM queue"
+        )
         rows = [
-            (row["id"], row["channel_id"], int(row["max_height"] or 0))
+            (
+                row["id"],
+                row["channel_id"],
+                int(row["max_height"] or 0),
+                int(row["play_count"] or 0),
+            )
             for row in await cursor.fetchall()
         ]
         if not rows:
