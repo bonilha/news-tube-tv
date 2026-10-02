@@ -434,11 +434,14 @@ async def _one_row(video_id: str) -> dict | None:
     return dict(row) if row else None
 
 
-def needs_video_scale(video_codec: str, width: int, height: int, target: tuple[int, int]) -> bool:
-    """H.264 is remuxed. OBS fits it to the canvas. Other codecs are scaled while encoded."""
-    if video_codec == "h264":
+def needs_video_scale(_video_codec: str, width: int, height: int, target: tuple[int, int]) -> bool:
+    """Scale when a side is below the OBS canvas. Exact canvas size is left alone.
+
+    H.264 below 1080 still goes through the probed encoder.
+    """
+    if width <= 0 or height <= 0:
         return False
-    return width > 0 and height > 0 and (width, height) != target
+    return width < target[0] or height < target[1]
 
 
 async def sync_downloads() -> None:
