@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Request, Depends
+from fastapi import APIRouter, Form, Request, Depends
 from fastapi.responses import HTMLResponse, JSONResponse
 from urllib.parse import quote
 
 from fastapi.templating import Jinja2Templates
 
 from app.auth import verify_credentials
+from app.broadcast import format_hm, get_control, save_limit_hours, save_schedule, start_transmission
 from app.cycle import cycle_manager
 from app.obs.manager import obs_manager, ALL_SCENES, SCENE_DESCRIPTIONS
 from app.queue import service as queue_svc
@@ -75,30 +76,26 @@ async def api_switch_scene(scene_name: str, _auth: bool = Depends(verify_credent
 @router.get("/dashboard/live", response_class=HTMLResponse)
 async def dashboard_live(request: Request, _auth: bool = Depends(verify_credentials)):
     status = await obs_manager.get_status()
+    cycle = cycle_manager.status_dict()
+    control = await get_control()
+    limit = int(control.get("limit_seconds") or 0)
     return _html(request, "partials/dashboard_live.html", {
         "status": status,
-        "cycle": cycle_manager.status_dict(),
+        "cycle": cycle,
         "queue_ready": await queue_svc.broadcast_ready(),
+        "control": control,
+        "limit_hours": limit / 3600 if limit else 12,
+        "elapsed_label": format_hm(cycle.get("on_air_seconds") or 0),
+        "limit_label": format_hm(limit),
     })
 
 
 @router.post("/api/streaming/start", response_class=JSONResponse)
 async def api_start_streaming(_auth: bool = Depends(verify_credentials)):
-    armed = await cycle_manager.enable()
-    if not armed.get("ok"):
-        return JSONResponse({
-            "ok": False,
-            "error": armed.get("error") or "A sequência não pode começar.",
-            "is_streaming": obs_manager.is_streaming,
-        })
-    ok, error = await obs_manager.start_streaming()
-    if not ok and error:
-        cycle_manager.set_message(error, error=True)
-    elif ok:
-        cycle_manager.set_message("Transmissão no ar, na mesma sequência do preview.")
+    result = await start_transmission()
     return JSONResponse({
-        "ok": ok,
-        "error": error,
+        "ok": result.get("ok"),
+        "error": result.get("error") or "",
         "is_streaming": obs_manager.is_streaming,
     })
 
@@ -107,6 +104,41 @@ async def api_start_streaming(_auth: bool = Depends(verify_credentials)):
 async def api_stop_streaming(_auth: bool = Depends(verify_credentials)):
     await obs_manager.stop_streaming()
     return JSONResponse({"ok": True, "is_streaming": False})
+
+
+@router.post("/api/streaming/finish", response_class=JSONResponse)
+async def api_finish_streaming(_auth: bool = Depends(verify_credentials)):
+    """Let the current video end, play the bumper, then stop RTMP and the cycle."""
+    if not cycle_manager.is_enabled:
+        return JSONResponse({"ok": False, "error": "O ciclo não está ligado."})
+    cycle_manager.request_finish()
+    return JSONResponse({"ok": True, "finish_requested": True})
+
+
+@router.post("/api/broadcast/limit", response_class=JSONResponse)
+async def api_broadcast_limit(
+    hours: float = Form(...),
+    _auth: bool = Depends(verify_credentials),
+):
+    try:
+        await save_limit_hours(hours)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)})
+    return JSONResponse({"ok": True})
+
+
+@router.post("/api/broadcast/schedule", response_class=JSONResponse)
+async def api_broadcast_schedule(
+    mode: str = Form("off"),
+    schedule_time: str = Form(""),
+    schedule_date: str = Form(""),
+    _auth: bool = Depends(verify_credentials),
+):
+    try:
+        await save_schedule(mode, schedule_time, schedule_date)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)})
+    return JSONResponse({"ok": True})
 
 
 @router.get("/api/cycle/status", response_class=JSONResponse)

@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS stream_config (
     services_path TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS broadcast_control (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    limit_seconds INTEGER NOT NULL DEFAULT 43200,
+    schedule_mode TEXT NOT NULL DEFAULT 'off',
+    schedule_time TEXT NOT NULL DEFAULT '',
+    schedule_date TEXT NOT NULL DEFAULT '',
+    last_fired_on TEXT NOT NULL DEFAULT '',
+    armed_for TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     channel_id INTEGER NOT NULL,
@@ -100,6 +110,9 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE queue ADD COLUMN max_height INTEGER NOT NULL DEFAULT 0"
             )
+        await db.execute(
+            "INSERT OR IGNORE INTO broadcast_control (id, limit_seconds) VALUES (1, 43200)"
+        )
         await db.commit()
 
 

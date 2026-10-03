@@ -44,6 +44,8 @@ async def _queue_refresh_loop() -> None:
         log.info("Startup queue: %s", stats)
     except Exception:
         log.exception("Startup queue failed")
+    finally:
+        _startup_done.set()
     while True:
         minutes = settings.QUEUE_REFRESH_MINUTES
         if minutes <= 0:
@@ -54,6 +56,22 @@ async def _queue_refresh_loop() -> None:
             log.info("Queue maintenance: %s", stats)
         except Exception:
             log.exception("Queue maintenance failed")
+
+_startup_done = asyncio.Event()
+
+
+async def _broadcast_loop() -> None:
+    """Local clock: open downloads before a scheduled start, then go on air."""
+    from app.broadcast import tick
+
+    await _startup_done.wait()
+    while True:
+        try:
+            await tick()
+        except Exception:
+            log.exception("Broadcast schedule failed")
+        await asyncio.sleep(15)
+
 
 # Ensure runtime directories exist
 settings.ASSETS_DIR.mkdir(parents=True, exist_ok=True)
@@ -76,9 +94,15 @@ async def lifespan(app: FastAPI):
     queue_download.hold_downloads()
     refresh = asyncio.create_task(_queue_refresh_loop())
     buffer = asyncio.create_task(_queue_buffer_loop())
+    schedule = asyncio.create_task(_broadcast_loop())
     yield
+    schedule.cancel()
     buffer.cancel()
     refresh.cancel()
+    try:
+        await schedule
+    except asyncio.CancelledError:
+        pass
     try:
         await buffer
     except asyncio.CancelledError:

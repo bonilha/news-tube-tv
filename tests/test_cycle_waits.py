@@ -13,6 +13,7 @@ class FakeObs:
         self.statuses = list(statuses)
         self.switched = []
         self.actions = []
+        self.is_streaming = False
 
     async def get_media_input_status(self, input_name):
         if len(self.statuses) > 1:

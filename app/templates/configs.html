@@ -57,6 +57,35 @@
     <button type="submit" class="btn btn-primary">Salvar</button>
 </form>
 
+<form method="post" action="/configs/cookies" enctype="multipart/form-data"
+      hx-post="/configs/cookies" hx-target="#content" hx-swap="innerHTML" hx-encoding="multipart/form-data"
+      class="card mt-2">
+    <h2 class="mb-2">Cookies do YouTube</h2>
+    <p class="text-sm text-muted mb-2">
+        O arquivo tem de ser Netscape, como a aplicação já usa: a primeira linha
+        <code># Netscape HTTP Cookie File</code> ou linhas com os campos separados por tabulação.
+        Ele é gravado em <code>cookies/cookiesyoutube.txt</code>.
+        {% if cookie_present %}Há um arquivo salvo.{% else %}Nenhum arquivo salvo ainda.{% endif %}
+    </p>
+    {% if cookie_saved %}
+    <div class="mb-2" style="color:var(--success-color)">Cookies aceitos.</div>
+    {% endif %}
+    {% if cookie_error %}
+    <div class="mb-2" style="color:var(--danger-color)">{{ cookie_error }}</div>
+    {% endif %}
+    <div class="mb-2">
+        <label class="text-sm text-muted" for="cookies-file">Arquivo Netscape</label>
+        <input type="file" id="cookies-file" name="cookies_file" accept=".txt,text/plain"
+               style="display:block; margin-top:0.25rem;">
+    </div>
+    <button type="submit" class="btn btn-primary">Usar este arquivo</button>
+</form>
+
+<form method="post" action="/configs/cookies/edge"
+      hx-post="/configs/cookies/edge" hx-target="#content" hx-swap="innerHTML" class="mt-2">
+    <button type="submit" class="btn btn-ghost">Pegar cookies do Edge</button>
+</form>
+
 <script>
 (function () {
     var services = {{ services_json | safe }};

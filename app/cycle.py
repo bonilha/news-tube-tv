@@ -148,6 +148,9 @@ class CycleManager:
             "aired_ids": sorted(self._aired),
             "message": self._message,
             "error": self._error,
+            "finish_requested": bool(getattr(self, "_finish_requested", False)),
+            "on_air_seconds": int(getattr(self, "_on_air_seconds", 0)),
+            "limit_seconds": int(getattr(self, "_limit_seconds", 0) or 0),
         }
 
     def broadcast_marks(self) -> dict:
@@ -262,9 +265,20 @@ class CycleManager:
             self._listening = True
 
         self._enabled = True
+        self._finish_requested = False
+        self._on_air_seconds = 0.0
+        self._limit_seconds = None
+
+        async def _load_limit() -> int:
+            from app.broadcast import current_limit_seconds
+            return await current_limit_seconds()
+
+        self._limit_loader = _load_limit
         self._message = "Preview da fila no OBS: bumper, vídeo, bumper."
         self._error = False
         self._start_task()
+        from app.broadcast import note_cycle_started
+        note_cycle_started()
         log.info("Queue player preview started")
         return {
             "ok": True,
@@ -319,6 +333,54 @@ class CycleManager:
             # The cycle gave up its turn, usually no file to play. Try again on a
             # cadence instead of spinning.
             await asyncio.sleep(_RETRY_WAIT_SEC)
+
+    def request_finish(self) -> None:
+        """After the current video, play the bumper and then stop. Never cuts mid-media."""
+        self._finish_requested = True
+        self.set_message(
+            "Encerramento pedido: o vídeo atual termina, a vinheta toca e a transmissão para."
+        )
+
+    def _add_airtime(self, milliseconds: int) -> None:
+        """Count bumper and video time only while RTMP is up."""
+        if not obs_manager.is_streaming:
+            return
+        self._on_air_seconds = float(getattr(self, "_on_air_seconds", 0) or 0)
+        self._on_air_seconds += max(0, int(milliseconds or 0)) / 1000.0
+        limit = int(getattr(self, "_limit_seconds", 0) or 0)
+        if limit > 0 and self._on_air_seconds >= limit:
+            self.request_finish()
+
+    async def _refresh_limit(self) -> None:
+        loader = getattr(self, "_limit_loader", None)
+        if loader is None:
+            return
+        self._limit_seconds = int(await loader() or 0)
+
+    async def _finish_broadcast(self) -> None:
+        """Stop RTMP if it is up, stop the cycle, and close downloads."""
+        self._finish_requested = False
+        self._enabled = False
+        if obs_manager.is_streaming:
+            await obs_manager.stop_streaming()
+        from app.broadcast import hold_until_needed
+        hold_until_needed()
+        self.set_message("Transmissão encerrada depois da vinheta.")
+        self._error = False
+
+    async def _closing_bumper(self) -> None:
+        """One bumper after the video that crossed the stop, then no other video."""
+        await obs_manager.switch_scene(SCENE_BUMPER)
+        self._state = _State.BUMPER
+        self._current_video_title = ""
+        self._current_id = ""
+        await overlay.hide()
+        queue_download.hold_player_release(True)
+        try:
+            await self._wait_end(self._bumper_input)
+        finally:
+            queue_download.hold_player_release(False)
+        self._add_airtime(getattr(self, "_last_media_ms", 0))
 
     def disable(self):
         """Disable the queue player. Stops the cycle if running."""
@@ -438,6 +500,8 @@ class CycleManager:
                 saw_active = True
             new_cursor = int(media.get("mediaCursor") or 0)
             duration = int(media.get("mediaDuration") or 0) or duration
+            if duration > 0:
+                self._last_media_ms = duration
             if new_cursor != cursor:
                 cursor, progress_at = new_cursor, loop.time()
             at_end = duration > 0 and cursor >= duration - 200
@@ -540,6 +604,7 @@ class CycleManager:
         try:
             await self._load_pass()
             while self._enabled:
+                await self._refresh_limit()
                 await obs_manager.switch_scene(SCENE_BUMPER)
                 self._state = _State.BUMPER
                 self._current_video_title = ""
@@ -561,6 +626,11 @@ class CycleManager:
                     wait = _OBS_BACKOFF_SEC if self._message == _OBS_STALE else _RETRY_WAIT_SEC
                     await asyncio.sleep(wait)
                     continue
+
+                self._add_airtime(getattr(self, "_last_media_ms", 0))
+                if self._finish_requested:
+                    await self._finish_broadcast()
+                    return
 
                 video = await self._take_next()
                 if video is None:
@@ -633,6 +703,11 @@ class CycleManager:
                 self._protect()
                 self._publish_keep_skip()
                 await overlay.hide()
+                self._add_airtime(getattr(self, "_last_media_ms", 0))
+                if self._finish_requested:
+                    await self._closing_bumper()
+                    await self._finish_broadcast()
+                    return
 
         finally:
             self._state = _State.STOPPED

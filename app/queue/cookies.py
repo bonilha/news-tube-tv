@@ -62,8 +62,88 @@ def invalidate() -> None:
     _checked_at = 0.0
 
 
-def check_cookies() -> bool:
-    """Convert the cookie file and ask yt-dlp for one video without downloading it."""
+class EdgeCookiesError(Exception):
+    """Edge has no readable YouTube session. The page shows this; it is not the alarm."""
+
+
+def cookie_file() -> Path:
+    return settings.COOKIES_DIR / "cookiesyoutube.txt"
+
+
+def store_netscape(text: str) -> None:
+    """Write a Netscape cookie file. Anything else is refused and the current file stays."""
+    if not _looks_netscape(text):
+        raise ValueError(
+            "O arquivo tem de estar no formato Netscape "
+            "(# Netscape HTTP Cookie File, ou linhas separadas por tabulação)."
+        )
+    dest = cookie_file()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(_normalize_netscape(text), encoding="utf-8")
+    invalidate()
+
+
+def export_edge_cookies(dest: Path | None = None) -> Path:
+    """Read the Default Edge profile and store a Netscape file."""
+    dest = dest or cookie_file()
+    try:
+        from yt_dlp.cookies import extract_cookies_from_browser
+        jar = extract_cookies_from_browser("edge", "Default")
+    except Exception as exc:
+        raise EdgeCookiesError(
+            "Não foi possível ler os cookies do Microsoft Edge."
+        ) from exc
+    lines = ["# Netscape HTTP Cookie File", ""]
+    names: set[str] = set()
+    for cookie in jar:
+        domain = cookie.domain or ""
+        if "youtube.com" not in domain and "google.com" not in domain:
+            continue
+        include_sub = "TRUE" if domain.startswith(".") else "FALSE"
+        secure = "TRUE" if cookie.secure else "FALSE"
+        expires = str(int(cookie.expires or 0))
+        prefix = "#HttpOnly_" if cookie.has_nonstandard_attr("HttpOnly") else ""
+        lines.append("\t".join((
+            f"{prefix}{domain}", include_sub, cookie.path or "/",
+            secure, expires, cookie.name, cookie.value or "",
+        )))
+        names.add(cookie.name)
+    if not (names & _AUTH_NAMES):
+        raise EdgeCookiesError(
+            "O Edge não tem sessão do YouTube. Entre no YouTube nesse navegador e tente de novo."
+        )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    invalidate()
+    return dest
+
+
+def check_cookies(*, try_edge: bool = True) -> bool:
+    """Convert the cookie file and ask yt-dlp for one video without downloading it.
+
+    One failed check reads Edge once and checks again. The alarm stays off until
+    that second check also fails.
+    """
+    if _accept_file():
+        return True
+    if not try_edge:
+        return False
+    first = _message
+    try:
+        export_edge_cookies()
+    except EdgeCookiesError as exc:
+        mark_rejected(f"{first} Leitura automática do Edge também falhou: {exc}")
+        return False
+    if _accept_file():
+        return True
+    mark_rejected(
+        f"{_message} Os cookies lidos do Edge também foram recusados."
+    )
+    return False
+
+
+def _accept_file() -> bool:
+    """Validate the file on disk. Does not call Edge."""
     global _ok, _message, _checked_at, _source_mtime, _netscape_path
     source = _find_source()
     if source is None:

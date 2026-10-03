@@ -24,6 +24,8 @@ class FakeObs:
     def __init__(self, statuses):
         self._statuses = itertools.cycle(statuses)
         self.switched = []
+        self.is_streaming = False
+        self.stopped = False
 
     async def get_media_input_status(self, input_name):
         return next(self._statuses)
@@ -36,6 +38,10 @@ class FakeObs:
 
     async def switch_scene(self, scene_name):
         self.switched.append(scene_name)
+
+    async def stop_streaming(self):
+        self.is_streaming = False
+        self.stopped = True
 
 
 class FakeOverlay:
