@@ -9,7 +9,7 @@ from urllib.parse import quote
 from fastapi.templating import Jinja2Templates
 
 from app.auth import verify_credentials
-from app.broadcast import format_hm, get_control, save_limit_hours, save_schedule, start_transmission
+from app.broadcast import format_hm, get_control, save_limit_hours, start_transmission
 from app.cycle import cycle_manager
 from app.obs.manager import obs_manager, ALL_SCENES, SCENE_DESCRIPTIONS
 from app.queue import service as queue_svc
@@ -122,20 +122,6 @@ async def api_broadcast_limit(
 ):
     try:
         await save_limit_hours(hours)
-    except ValueError as exc:
-        return JSONResponse({"ok": False, "error": str(exc)})
-    return JSONResponse({"ok": True})
-
-
-@router.post("/api/broadcast/schedule", response_class=JSONResponse)
-async def api_broadcast_schedule(
-    mode: str = Form("off"),
-    schedule_time: str = Form(""),
-    schedule_date: str = Form(""),
-    _auth: bool = Depends(verify_credentials),
-):
-    try:
-        await save_schedule(mode, schedule_time, schedule_date)
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": str(exc)})
     return JSONResponse({"ok": True})

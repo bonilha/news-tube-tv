@@ -86,6 +86,30 @@
     <button type="submit" class="btn btn-ghost">Pegar cookies do Edge</button>
 </form>
 
+<form method="post" action="/configs/schedule"
+      hx-post="/configs/schedule" hx-target="#content" hx-swap="innerHTML" class="card mt-2">
+    <h2 class="mb-2">Agendamento</h2>
+    <p class="text-sm text-muted mb-2">Relógio deste computador, hora em 24 h (00:00 a 23:59). Diário no mesmo horário, ou uma data e hora. Quinze minutos antes começa o download dos vídeos da fila.</p>
+    {% if schedule_saved %}
+    <div class="mb-2" style="color:var(--success-color)">Agendamento salvo.</div>
+    {% endif %}
+    {% if schedule_error %}
+    <div class="mb-2" style="color:var(--danger-color)">{{ schedule_error }}</div>
+    {% endif %}
+    <label class="mr-2"><input type="radio" name="schedule_mode" value="off" {% if control.schedule_mode == 'off' %}checked{% endif %}> Desligado</label>
+    <label class="mr-2"><input type="radio" name="schedule_mode" value="daily" {% if control.schedule_mode == 'daily' %}checked{% endif %}> Diário</label>
+    <label><input type="radio" name="schedule_mode" value="once" {% if control.schedule_mode == 'once' %}checked{% endif %}> Data única</label>
+    <div class="flex flex-center gap-1 mt-2">
+        <label class="text-sm text-muted" for="schedule-time">Hora (24 h)</label>
+        <input type="text" id="schedule-time" name="schedule_time" inputmode="numeric"
+               placeholder="18:30" maxlength="5" pattern="([01][0-9]|2[0-3]):[0-5][0-9]"
+               value="{{ control.schedule_time }}" style="width:90px; padding:0.3rem;">
+        <label class="text-sm text-muted" for="schedule-date">Data</label>
+        <input type="date" id="schedule-date" name="schedule_date" value="{{ control.schedule_date }}">
+        <button type="submit" class="btn btn-ghost">Salvar agendamento</button>
+    </div>
+</form>
+
 <script>
 (function () {
     var services = {{ services_json | safe }};

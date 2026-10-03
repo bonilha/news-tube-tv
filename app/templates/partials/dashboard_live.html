@@ -40,24 +40,6 @@
         <button type="submit" class="btn btn-ghost">Salvar duração</button>
     </form>
 </div>
-
-<div class="card mb-3">
-    <h3>Agendamento</h3>
-    <p class="text-sm text-muted mb-2">Relógio deste computador. Diário no mesmo horário, ou uma data e hora. Quinze minutos antes começa o download dos vídeos da fila.</p>
-    <form hx-post="/api/broadcast/schedule" hx-swap="none"
-          hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">
-        <label class="mr-2"><input type="radio" name="mode" value="off" {% if control.schedule_mode == 'off' %}checked{% endif %}> Desligado</label>
-        <label class="mr-2"><input type="radio" name="mode" value="daily" {% if control.schedule_mode == 'daily' %}checked{% endif %}> Diário</label>
-        <label><input type="radio" name="mode" value="once" {% if control.schedule_mode == 'once' %}checked{% endif %}> Data única</label>
-        <div class="flex flex-center gap-1 mt-2">
-            <label class="text-sm text-muted" for="schedule-time">Hora</label>
-            <input type="time" id="schedule-time" name="schedule_time" value="{{ control.schedule_time }}">
-            <label class="text-sm text-muted" for="schedule-date">Data</label>
-            <input type="date" id="schedule-date" name="schedule_date" value="{{ control.schedule_date }}">
-            <button type="submit" class="btn btn-ghost">Salvar agendamento</button>
-        </div>
-    </form>
-</div>
 {% if not queue_ready %}
 <p class="text-sm text-muted mb-2">Ao vivo e simulação ficam bloqueados até haver um MP4 na fila. Parar continua disponível se essa transmissão ou simulação já estiver ligada.</p>
 {% endif %}
