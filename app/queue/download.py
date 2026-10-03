@@ -191,6 +191,7 @@ def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list
         if row.get("status") in _KEEP_STATUSES
         and row.get("video_id") not in skipped
         and not download_blocked(row)
+        and not channel_disabled(row)
     ]
     shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
     if shuffled:
@@ -227,6 +228,7 @@ def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> li
         if row.get("video_id") in skipped
         and row.get("video_id") not in seen
         and not download_blocked(row)
+        and not channel_disabled(row)
     ]
     if shuffled:
         candidates.sort(key=lambda r: (int(r.get("play_order") or 0), int(r.get("id") or 0)))
@@ -404,6 +406,13 @@ async def discard_video_files(video_id: str, local_path: str = "") -> None:
     if local_path:
         paths.append(Path(local_path))
     await remove_files(paths)
+
+
+def channel_disabled(row: dict) -> bool:
+    """Channel toggle off. Missing `active` stays eligible so older rows still play."""
+    if "active" not in row or row.get("active") is None:
+        return False
+    return int(row.get("active") or 0) == 0
 
 
 def download_blocked(row: dict) -> bool:

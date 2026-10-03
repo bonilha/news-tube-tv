@@ -63,6 +63,10 @@ class FakeDownload:
     def download_blocked(self, row):
         return False
 
+    def channel_disabled(self, row):
+        from app.queue.download import channel_disabled
+        return channel_disabled(row)
+
     def selected_encoder(self):
         return "libx264"
 

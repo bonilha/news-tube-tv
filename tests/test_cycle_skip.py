@@ -71,6 +71,10 @@ class FakeDownload:
     def download_blocked(self, row):
         return False
 
+    def channel_disabled(self, row):
+        from app.queue.download import channel_disabled
+        return channel_disabled(row)
+
     async def retry_error_videos(self):
         self.retries += 1
         return 0

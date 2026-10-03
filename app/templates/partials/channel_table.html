@@ -40,16 +40,16 @@
             </td>
             <td>
                 {% if ch.active %}
-                    <span class="status-badge status-on">ACTIVE</span>
+                    <span class="status-badge status-on">Ligado</span>
                 {% else %}
-                    <span class="status-badge status-off">PAUSED</span>
+                    <span class="status-badge status-off">Desligado</span>
                 {% endif %}
             </td>
             <td>
                 <div class="flex gap-1">
                     <button class="btn btn-ghost" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
                             hx-post="/channels/{{ ch.id }}/toggle" hx-target="#channels-table" hx-swap="innerHTML">
-                        {% if ch.active %}Pause{% else %}Resume{% endif %}
+                        {% if ch.active %}Desabilitar{% else %}Habilitar{% endif %}
                     </button>
                     <button class="btn btn-danger" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
                             hx-delete="/channels/{{ ch.id }}" hx-target="#channels-table" hx-swap="innerHTML"

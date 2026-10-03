@@ -20,6 +20,22 @@ def _row(video_id: str, play_order: int, **extra) -> dict:
     return row
 
 
+def test_disabled_channel_stays_out_of_the_pass_and_the_window():
+    rows = [
+        _row("on", 1, active=0),
+        _row("off", 2, active=0),
+        _row("next", 3, active=1),
+    ]
+    video, wrapped = next_in_pass(rows, set())
+    assert video["video_id"] == "next"
+    assert wrapped is False
+    assert buffer_ids(rows, 5, set()) == ["next"]
+    still, _wrapped = next_in_pass(rows, set(), playing_id="on")
+    assert still["video_id"] == "on"
+    assert "on" not in buffer_ids(rows, 5, set())
+    assert retain_ids(rows, 5, set(), on_air="on") == {"next", "on"}
+
+
 def test_five_unplayed_do_not_pull_the_next_lap():
     rows = [
         _row("d", 4),
