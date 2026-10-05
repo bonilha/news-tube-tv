@@ -1,7 +1,9 @@
 """Transmission length and the local-clock start schedule.
 
-Downloads stay closed unless the cycle is running or the next start is inside
-the fifteen minutes before it (or already due and waiting for an MP4).
+With the schedule off, the five-file window stays open so the operator can
+start by hand. A daily or one-shot slot keeps downloads closed until the
+cycle is running or the next start is inside the fifteen minutes before it
+(or already due and waiting for an MP4).
 """
 from __future__ import annotations
 
@@ -118,7 +120,10 @@ def decide(
 ) -> dict:
     """What the 15s tick should do. Pure: no clock and no database."""
     start = scheduled_start(row, now)
-    open_downloads = bool(cycle_on)
+    # Off means manual operation. The start button needs an MP4, so the
+    # window has to fill before the cycle can turn on.
+    mode = row.get("schedule_mode") or "off"
+    open_downloads = bool(cycle_on) or mode == "off"
     start_now = False
     armed_for = row.get("armed_for") or ""
     last_fired_on = None

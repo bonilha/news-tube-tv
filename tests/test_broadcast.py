@@ -25,6 +25,19 @@ def _row_sched(**extra):
     return base
 
 
+def test_schedule_off_keeps_downloads_open_without_starting():
+    now = datetime(2026, 10, 4, 15, 0)
+    decision = decide(
+        now,
+        _row_sched(schedule_mode="off", schedule_time="", schedule_date=""),
+        cycle_on=False,
+        streaming=False,
+        ready=False,
+    )
+    assert decision["open_downloads"] is True
+    assert decision["start"] is False
+
+
 def test_fifteen_minutes_before_opens_downloads_only():
     now = datetime(2026, 10, 3, 7, 45)
     decision = decide(now, _row_sched(), cycle_on=False, streaming=False, ready=False)
