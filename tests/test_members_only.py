@@ -24,6 +24,11 @@ def _public_payload(**extra) -> dict:
     return payload
 
 
+def test_http_error_body_is_members_only():
+    payload = {"error": _MEMBERS}
+    assert members_only(payload) is True
+
+
 def test_detail_error_marks_members_only_and_blocks_eligibility():
     payload = _public_payload(error=_MEMBERS)
     assert members_only(payload) is True

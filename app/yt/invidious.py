@@ -167,20 +167,28 @@ def members_only(payload: dict[str, Any] | None) -> bool:
 async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | None]:
     """Title, max stream height, and members-only from the video endpoint.
 
-    The channel list does not honor hl and does not say members-only.
-    Height is 0 when the request fails or lists none. Members is None when
-    the detail request fails, so a down instance does not drop the video.
+    The channel list ignores hl, so its title is the original language.
+    The localized title is on GET /videos/:id?hl=. Members-only answers
+    HTTP 500 with only `error`, which `_get` would throw away.
+    Members is None when the request fails for another reason.
     """
     if not video_id:
         return fallback, 0, None
+    url = f"{_api_url()}/videos/{video_id}"
     try:
-        data = await _get(f"/videos/{video_id}")
-    except InvidiousError:
+        async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
+            resp = await client.get(url, params={"hl": content_language()})
+            data = resp.json()
+    except (httpx.HTTPError, ValueError):
         return fallback, 0, None
     if not isinstance(data, dict):
         return fallback, 0, None
+    if members_only(data):
+        return fallback, 0, True
+    if resp.status_code >= 400 or data.get("error"):
+        return fallback, 0, None
     title = (data.get("title") or "").strip() or fallback
-    return title, stream_max_height(data), members_only(data)
+    return title, stream_max_height(data), False
 
 
 async def channel_videos(ucid: str, sort_by: str = "newest") -> list[dict[str, Any]]:

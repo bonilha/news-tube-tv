@@ -547,8 +547,7 @@ async def _download_keep(keep: list[str]) -> None:
             text = str(exc)
             if permanent_download_error(text):
                 log.warning("Download refused for %s: %s", video_id, text.splitlines()[0][:300])
-                await _store_error(video_id, text[:300])
-                await remove_files(_leftovers(video_id))
+                await delete_queue_video(video_id)
                 continue
             log.exception("Download failed for %s", video_id)
             if yt_cookies.looks_like_cookie_failure(text):
@@ -1010,6 +1009,41 @@ async def _store_error(video_id: str, message: str) -> None:
             (message, video_id),
         )
         await db.commit()
+
+
+async def delete_queue_video(video_id: str) -> None:
+    """Remove one video from the queue and delete its files."""
+    local_path = ""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT local_path FROM queue WHERE video_id = ?",
+            (video_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return
+        local_path = row["local_path"] or ""
+        await db.execute("DELETE FROM queue WHERE video_id = ?", (video_id,))
+        await db.commit()
+    await discard_video_files(video_id, local_path)
+
+
+async def purge_members_videos() -> int:
+    """Drop members-only rows so they leave the queue instead of showing an error."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT video_id, download_error FROM queue WHERE download_error != ''"
+        )
+        rows = [dict(row) for row in await cursor.fetchall()]
+    doomed = [
+        row["video_id"] for row in rows
+        if permanent_download_error(row["download_error"])
+    ]
+    for video_id in doomed:
+        await delete_queue_video(video_id)
+    if doomed:
+        log.info("Removed %d members-only videos from the queue", len(doomed))
+    return len(doomed)
 
 
 async def reset_video_error(queue_id: int) -> bool:

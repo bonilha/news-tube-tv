@@ -27,6 +27,7 @@ _maintain_current: tuple[str, asyncio.Task] | None = None
 
 async def scan_all_channels() -> dict[str, int]:
     """Scan every active channel and insert eligible videos. Returns stats."""
+    await queue_download.purge_members_videos()
     added = 0
     skipped = 0
     errors = 0
@@ -83,18 +84,20 @@ async def _scan_channel(
             if not eligible:
                 skipped += 1
                 continue
-            meta["title"], meta["max_height"], members = await invidious.video_title(
-                meta["video_id"], meta["title"],
+            listed = meta["title"]
+            detail_title, meta["max_height"], members = await invidious.video_title(
+                meta["video_id"], "",
             )
             if members:
-                await db.execute(
-                    """UPDATE queue
-                       SET local_path = '', download_error = ?
-                       WHERE video_id = ?""",
-                    ("Conteúdo exclusivo para membros", meta["video_id"]),
-                )
+                await queue_download.delete_queue_video(meta["video_id"])
                 skipped += 1
                 continue
+            if members is None or not detail_title:
+                # The channel list title is the original language. Do not store
+                # it when the localized video endpoint did not answer.
+                skipped += 1
+                continue
+            meta["title"] = detail_title
 
             try:
                 play_order = next_order + 1 if next_order > 0 else 0
