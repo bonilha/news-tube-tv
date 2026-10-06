@@ -83,9 +83,18 @@ async def _scan_channel(
             if not eligible:
                 skipped += 1
                 continue
-            meta["title"], meta["max_height"] = await invidious.video_title(
+            meta["title"], meta["max_height"], members = await invidious.video_title(
                 meta["video_id"], meta["title"],
             )
+            if members:
+                await db.execute(
+                    """UPDATE queue
+                       SET local_path = '', download_error = ?
+                       WHERE video_id = ?""",
+                    ("Conteúdo exclusivo para membros", meta["video_id"]),
+                )
+                skipped += 1
+                continue
 
             try:
                 play_order = next_order + 1 if next_order > 0 else 0

@@ -152,21 +152,35 @@ def stream_max_height(data: dict[str, Any]) -> int:
     return max(qualities) if qualities else 0
 
 
-async def video_title(video_id: str, fallback: str) -> tuple[str, int]:
-    """Title and max stream height from the video endpoint, which honors hl.
+def members_only(payload: dict[str, Any] | None) -> bool:
+    """True when the video-detail payload says the video is for channel members.
 
-    The channel list does not. Height is 0 when the request fails or lists none.
+    The channel list does not include this. GET /videos/:id puts the YouTube
+    playability reason in `error` ("Join this channel… members-only…").
+    """
+    if not payload:
+        return False
+    error = str(payload.get("error") or "")
+    return "member" in error.lower()
+
+
+async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | None]:
+    """Title, max stream height, and members-only from the video endpoint.
+
+    The channel list does not honor hl and does not say members-only.
+    Height is 0 when the request fails or lists none. Members is None when
+    the detail request fails, so a down instance does not drop the video.
     """
     if not video_id:
-        return fallback, 0
+        return fallback, 0, None
     try:
         data = await _get(f"/videos/{video_id}")
     except InvidiousError:
-        return fallback, 0
+        return fallback, 0, None
     if not isinstance(data, dict):
-        return fallback, 0
+        return fallback, 0, None
     title = (data.get("title") or "").strip() or fallback
-    return title, stream_max_height(data)
+    return title, stream_max_height(data), members_only(data)
 
 
 async def channel_videos(ucid: str, sort_by: str = "newest") -> list[dict[str, Any]]:
@@ -255,10 +269,7 @@ def is_eligible(
     if paid:
         return False, "Conteúdo pago/premium"
 
-    members = meta.get("is_members") or (
-        meta.get("isListed") is False and meta.get("error") == "members"
-    )
-    if members:
+    if meta.get("is_members") or members_only(meta):
         return False, "Conteúdo exclusivo para membros"
 
     return True, "ok"
@@ -304,7 +315,7 @@ def normalize_video(payload: dict[str, Any]) -> dict[str, Any]:
         "premiereTimestamp": payload.get("premiereTimestamp"),
         "paid": bool(payload.get("paid") or payload.get("premium")),
         "isListed": payload.get("isListed", True),
-        "is_members": bool(payload.get("isFamilySafe") is False and "member" in str(payload.get("error") or "")),
+        "is_members": members_only(payload),
         "thumb": thumb,
         "error": payload.get("error"),
     }

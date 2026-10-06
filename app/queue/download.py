@@ -415,6 +415,16 @@ def channel_disabled(row: dict) -> bool:
     return int(row.get("active") or 0) == 0
 
 
+def permanent_download_error(text: str) -> bool:
+    """A refusal that will not change on the next pass. Members-only is one."""
+    folded = (text or "").lower()
+    return (
+        "exclusivo para membros" in folded
+        or "members-only" in folded
+        or "join this channel" in folded
+    )
+
+
 def download_blocked(row: dict) -> bool:
     """Too old, too long, failed, or not a queue status. It must not take a window slot."""
     if row.get("status") not in ("playing", "pending", "played"):
@@ -534,8 +544,13 @@ async def _download_keep(keep: list[str]) -> None:
             if downloads_held() or video_id in _abandoned:
                 log.info("Download stopped until the queue is shuffled: %s", video_id)
                 return
-            log.exception("Download failed for %s", video_id)
             text = str(exc)
+            if permanent_download_error(text):
+                log.warning("Download refused for %s: %s", video_id, text.splitlines()[0][:300])
+                await _store_error(video_id, text[:300])
+                await remove_files(_leftovers(video_id))
+                continue
+            log.exception("Download failed for %s", video_id)
             if yt_cookies.looks_like_cookie_failure(text):
                 # One video's 403 is not proof the cookies are dead. Age gates,
                 # private videos and geo blocks answer the same way. Re-probe on
@@ -956,12 +971,13 @@ async def retry_error_videos() -> int:
     """Clear download errors so videos whose turn came round are tried again.
 
     Called when the queue wraps. A row is retried only when the error is the
-    one thing blocking it — a stale or over-long video keeps its block.
+    one thing blocking it. A stale, over-long, or members-only video keeps its block.
     """
     rows = await _queue_rows()
     ready = [
         row["video_id"] for row in rows
         if row.get("download_error")
+        and not permanent_download_error(row["download_error"])
         and not download_blocked({**row, "download_error": ""})
     ]
     if not ready:
