@@ -15,7 +15,7 @@ from app.database import get_db
 log = logging.getLogger(__name__)
 
 PREP_MINUTES = 15
-DEFAULT_LIMIT_SECONDS = 12 * 60 * 60
+DEFAULT_LIMIT_SECONDS = 0
 
 _gate_holding = False
 

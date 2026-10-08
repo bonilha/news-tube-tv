@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS stream_config (
 
 CREATE TABLE IF NOT EXISTS broadcast_control (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    limit_seconds INTEGER NOT NULL DEFAULT 43200,
+    limit_seconds INTEGER NOT NULL DEFAULT 0,
     schedule_mode TEXT NOT NULL DEFAULT 'off',
     schedule_time TEXT NOT NULL DEFAULT '',
     schedule_date TEXT NOT NULL DEFAULT '',
@@ -116,7 +116,7 @@ async def init_db() -> None:
                 "ALTER TABLE queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
             )
         await db.execute(
-            "INSERT OR IGNORE INTO broadcast_control (id, limit_seconds) VALUES (1, 43200)"
+            "INSERT OR IGNORE INTO broadcast_control (id, limit_seconds) VALUES (1, 0)"
         )
         await db.commit()
 

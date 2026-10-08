@@ -33,6 +33,7 @@
     <h3>Duração da transmissão</h3>
     <p class="text-sm mb-2">No ar nesta transmissão: <strong>{{ elapsed_label }}</strong>{% if limit_seconds %} de <strong>{{ limit_label }}</strong>. Conta vídeo e vinheta. Ao atingir o limite, o vídeo atual termina, a vinheta toca e a transmissão para.{% else %} — <strong>contínuo</strong>. Não há limite: a transmissão segue até você mandar parar.{% endif %}</p>
     <form class="flex flex-center gap-1" hx-post="/api/broadcast/limit" hx-swap="none"
+          hx-trigger="change, submit"
           hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">
         <label class="text-sm text-muted" for="limit-seconds">Duração</label>
         <select id="limit-seconds" name="seconds" style="width:160px; padding:0.3rem;">

@@ -171,6 +171,46 @@ def test_a_zero_limit_reads_back_as_continuous(monkeypatch):
     assert asyncio.run(current_limit_seconds()) == 0
 
 
+def test_a_new_database_starts_continuous(monkeypatch, tmp_path):
+    from app.config import settings
+    from app.database import init_db
+
+    monkeypatch.setattr(settings, "DB_PATH", tmp_path / "broadcast.db")
+
+    async def run():
+        await init_db()
+        row = await broadcast_mod.get_control()
+        assert row["limit_seconds"] == 0
+        assert await current_limit_seconds() == 0
+        await save_limit_seconds(1800)
+        assert await current_limit_seconds() == 1800
+        await save_limit_seconds(0)
+        assert await current_limit_seconds() == 0
+
+    asyncio.run(run())
+
+
+def test_continuous_option_stays_selected_in_the_live_partial():
+    from fastapi.templating import Jinja2Templates
+
+    templates = Jinja2Templates(directory="app/templates")
+    options = [(m * 1800, f"{m}") for m in range(1, 49)] + [(0, "Contínuo")]
+    html = templates.env.get_template("partials/dashboard_live.html").render(
+        status={"connected": False, "is_streaming": False, "current_scene": ""},
+        cycle={"enabled": False, "finish_requested": False, "on_air_seconds": 0, "message": "", "state": "stopped", "error": False},
+        queue_ready=False,
+        control={},
+        limit_seconds=0,
+        limit_options=options,
+        elapsed_label="0 h 00 min",
+        limit_label="Contínuo",
+    )
+    assert 'value="0" selected' in html or 'value="0"  selected' in html
+    assert "contínuo" in html
+    assert "de <strong>12" not in html
+    assert 'hx-trigger="change, submit"' in html
+
+
 def test_disabled_channel_is_outside_the_five():
     rows = [
         {"id": 1, "video_id": "off", "status": "pending", "published_unix": int(time.time()),
