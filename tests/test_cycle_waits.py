@@ -91,6 +91,9 @@ class FakeQueue:
     async def maintain_queue(self):
         return {}
 
+    async def release_stuck_playing(self):
+        return 0
+
 
 @pytest.fixture
 def mgr(monkeypatch):

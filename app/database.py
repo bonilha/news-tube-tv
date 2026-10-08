@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS queue (
     play_order INTEGER NOT NULL DEFAULT 0,
     play_count INTEGER NOT NULL DEFAULT 0,
     max_height INTEGER NOT NULL DEFAULT 0,
+    retry_count INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (channel_id) REFERENCES channels(id) ON DELETE CASCADE,
     UNIQUE(video_id)
 );
@@ -68,7 +69,7 @@ CREATE TABLE IF NOT EXISTS queue (
 
 @asynccontextmanager
 async def get_db() -> AsyncIterator[aiosqlite.Connection]:
-    db = await aiosqlite.connect(str(settings.DB_PATH))
+    db = await aiosqlite.connect(str(settings.DB_PATH), timeout=30)
     db.row_factory = aiosqlite.Row
     await db.execute("PRAGMA foreign_keys = ON")
     # The cycle, the download sync and the HTMX polls write at the same time.
@@ -109,6 +110,10 @@ async def init_db() -> None:
         if "max_height" not in columns:
             await db.execute(
                 "ALTER TABLE queue ADD COLUMN max_height INTEGER NOT NULL DEFAULT 0"
+            )
+        if "retry_count" not in columns:
+            await db.execute(
+                "ALTER TABLE queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
             )
         await db.execute(
             "INSERT OR IGNORE INTO broadcast_control (id, limit_seconds) VALUES (1, 43200)"

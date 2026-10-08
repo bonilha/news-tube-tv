@@ -62,6 +62,10 @@ _encoder: str | None = None
 _encoder_args: tuple[str, ...] = ()
 _encoder_label: str = ""
 _lock = asyncio.Lock()
+# Held only while play_order is rewritten or while sync reads that order.
+# Downloads stay outside it, so a shuffle does not wait for yt-dlp.
+play_order_lock = asyncio.Lock()
+_play_order_gen = 0
 _task: asyncio.Task | None = None
 _dirty = False
 # Closed while startup or "Apagar fila e escanear" cleans, scans, and shuffles.
@@ -81,6 +85,28 @@ _stuck_deletes: set[str] = set()
 _abandoned: set[str] = set()
 _PLAYER_SOURCE = "NewsTube Fila"
 _MEDIA_STOP = "OBS_WEBSOCKET_MEDIA_INPUT_ACTION_STOP"
+
+
+PUBLISHED_MAX_AGE = 86400
+
+
+def published_cutoff(now: int | None = None) -> int:
+    """Unix time before which a video is older than 24h. One clock for purge and the window."""
+    return int(now if now is not None else time.time()) - PUBLISHED_MAX_AGE
+
+
+def published_too_old(published_unix: int, now: int | None = None) -> bool:
+    return int(published_unix or 0) < published_cutoff(now)
+
+
+def play_order_generation() -> int:
+    return _play_order_gen
+
+
+def note_play_order_changing() -> None:
+    """Call while holding play_order_lock, before the new order is committed."""
+    global _play_order_gen
+    _play_order_gen += 1
 
 
 def protect_video_ids(video_ids: set[str]) -> None:
@@ -208,24 +234,33 @@ def keep_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list
     return [row["video_id"] for row in eligible[:limit]]
 
 
-def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> list[str]:
+def buffer_ids(
+    rows: list[dict], limit: int, skip: set[str] | None = None, on_air: str = "",
+) -> list[str]:
     """Unplayed ids first. Aired ids fill only the slots those leave empty.
 
     Five videos still waiting this pass use the whole window, so nothing from
     the next lap is downloaded yet. With four waiting, the first aired id in
     play order takes the free slot. Download errors stay out of the window.
+    The id OBS is actually playing does not take one of those slots. A row
+    whose status is still "playing" after OBS stopped does, until that status
+    is cleared.
     """
-    fresh = keep_ids(rows, limit, skip)
+    aired = set(skip or ())
+    skipped = set(aired)
+    if on_air:
+        skipped.add(on_air)
+    fresh = keep_ids(rows, limit, skipped)
     if len(fresh) >= limit:
         return fresh
     remaining_limit = limit - len(fresh)
     seen = set(fresh)
-    skipped = skip or set()
     filler: list[str] = []
     shuffled = any(int(row.get("play_order") or 0) > 0 for row in rows)
     candidates = [
         row for row in rows
-        if row.get("video_id") in skipped
+        if row.get("video_id") in aired
+        and row.get("video_id") != on_air
         and row.get("video_id") not in seen
         and not download_blocked(row)
         and not channel_disabled(row)
@@ -245,8 +280,8 @@ def buffer_ids(rows: list[dict], limit: int, skip: set[str] | None = None) -> li
 
 
 def retain_ids(rows: list[dict], limit: int, skip: set[str] | None = None, on_air: str = "") -> set[str]:
-    """Files that stay: the download window, plus the id on air."""
-    keep = set(buffer_ids(rows, limit, skip))
+    """Files that stay: the download window, plus the id OBS is playing."""
+    keep = set(buffer_ids(rows, limit, skip, on_air))
     if on_air:
         keep.add(on_air)
     return keep
@@ -356,14 +391,17 @@ async def _sync_loop() -> None:
                 log.exception("Queue download sync failed")
 
 
-async def purge_expired() -> int:
+async def purge_expired(keep_ids_now: set[str] | None = None) -> int:
     """Delete expired rows, pending videos older than 24h, and videos exceeding max duration, plus files.
 
     Ids still needed by the live pass stay in the queue until that pass ends.
+    Ids in the download window just computed with the same 24h cutoff stay too,
+    so this pass cannot delete a file it is about to play or download.
     """
-    cutoff = int(time.time()) - 86400
+    cutoff = published_cutoff()
     max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     protected = set(_protected_ids)
+    protected.update(keep_ids_now or ())
     async with get_db() as db:
         cursor = await db.execute(
             """SELECT video_id, local_path FROM queue
@@ -431,7 +469,7 @@ def download_blocked(row: dict) -> bool:
         return True
     if row.get("download_error"):
         return True
-    if int(row.get("published_unix") or 0) < int(time.time()) - 86400:
+    if published_too_old(int(row.get("published_unix") or 0)):
         return True
     max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     if int(row.get("duration") or 0) > max_duration_sec:
@@ -468,36 +506,49 @@ async def sync_downloads() -> None:
     if downloads_held():
         return
     ensure_video_dirs()
-    await purge_expired()
-    if downloads_held():
+    async with play_order_lock:
+        generation = play_order_generation()
+        rows = await _queue_rows()
+        keep = buffer_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep, _on_air_id)
+        keep_set = retain_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep, _on_air_id)
+    await purge_expired(keep_set)
+    if downloads_held() or play_order_generation() != generation:
+        schedule_sync()
         return
-    rows = await _queue_rows()
     await _clear_missing_paths(rows)
     await _clear_finishable_errors(rows)
-    keep = buffer_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep)
-    keep_set = retain_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep, _on_air_id)
+    await _clear_permanent_errors(rows)
 
     if not _encoder:
         log.warning("Skipping downloads: no H.264 encoder")
     elif not yt_cookies.ensure_fresh():
         log.warning("Skipping downloads: %s", yt_cookies.status()["message"])
     else:
-        await _download_keep(keep)
+        await _download_keep(keep, generation)
 
-    if downloads_held():
+    if downloads_held() or play_order_generation() != generation:
+        schedule_sync()
         return
-    await _forget_paths_outside(keep_set)
+    async with play_order_lock:
+        if play_order_generation() != generation:
+            schedule_sync()
+            return
+        await _forget_paths_outside(keep_set)
     doomed: list[Path] = []
     for directory in (downloads_dir(), queue_dir(), settings.VIDEOS_DIR):
         doomed.extend(files_outside_keep(directory, keep_set))
     await remove_files(doomed)
 
 
-async def _download_keep(keep: list[str]) -> None:
-    """Download MP4s for the window. Missing files do not keep other ids on disk."""
+async def _download_keep(keep: list[str], generation: int) -> None:
+    """Download MP4s for the window. Missing files do not keep other ids on disk.
+
+    A shuffle that commits a new play_order stops this list. The follow-up sync
+    reads the finished order instead of downloading the old window.
+    """
     global _current_download
     for video_id in keep:
-        if downloads_held():
+        if downloads_held() or play_order_generation() != generation:
             return
         final = queue_file(video_id)
         legacy = settings.VIDEOS_DIR / f"{video_id}.mp4"
@@ -913,6 +964,35 @@ async def _clear_finishable_errors(rows: list[dict]) -> None:
     log.info("Cleared download errors for %d files waiting in downloads", len(ready))
 
 
+async def _clear_permanent_errors(rows: list[dict]) -> None:
+    """Clear permanent errors if a raw file is available to be moved.
+    
+    This allows videos that previously failed with members-only or similar errors
+    to be retried if the user manually provides a file.
+    """
+    ready = [
+        row["video_id"] for row in rows
+        if row.get("download_error") 
+        and permanent_download_error(row["download_error"])
+        and raw_download(row["video_id"])
+    ]
+    if not ready:
+        return
+    async with get_db() as db:
+        for video_id in ready:
+            await db.execute(
+                "UPDATE queue SET download_error = '', retry_count = 0 WHERE video_id = ?",
+                (video_id,),
+            )
+        await db.commit()
+    for row in rows:
+        if row["video_id"] in ready:
+            row["download_error"] = ""
+            # Update local state for row
+            row["retry_count"] = 0
+    log.info("Cleared permanent errors for %d files with raw download available", len(ready))
+
+
 async def _clear_missing_paths(rows: list[dict]) -> None:
     """Drop stored paths whose files are gone so the badge and the window agree."""
     missing = []
@@ -1003,7 +1083,14 @@ async def _store_path(video_id: str, path: Path) -> None:
 
 
 async def _store_error(video_id: str, message: str) -> None:
+    """Store download error and increment retry count for permanent errors."""
     async with get_db() as db:
+        # Increment retry_count for permanent errors
+        if permanent_download_error(message):
+            await db.execute(
+                "UPDATE queue SET retry_count = retry_count + 1 WHERE video_id = ?",
+                (video_id,),
+            )
         await db.execute(
             "UPDATE queue SET local_path = '', download_error = ? WHERE video_id = ?",
             (message, video_id),
@@ -1043,6 +1130,35 @@ async def purge_members_videos() -> int:
         await delete_queue_video(video_id)
     if doomed:
         log.info("Removed %d members-only videos from the queue", len(doomed))
+    return len(doomed)
+
+
+async def purge_permanent_errors() -> int:
+    """Remove videos with permanent errors that have been retried too many times.
+    
+    Videos with members-only or similar permanent errors are removed after 3 retries.
+    This prevents the queue from being blocked by videos that will never download.
+    """
+    MAX_RETRY_COUNT = 3
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT video_id, download_error FROM queue WHERE download_error != ''"
+        )
+        rows = [dict(row) for row in await cursor.fetchall()]
+    
+    doomed = []
+    for row in rows:
+        if permanent_download_error(row["download_error"]):
+            doomed.append(row["video_id"])
+    
+    if not doomed:
+        return 0
+    
+    # Delete the videos and their files
+    for video_id in doomed:
+        await delete_queue_video(video_id)
+    
+    log.info("Removed %d videos with permanent errors after max retries", len(doomed))
     return len(doomed)
 
 

@@ -64,6 +64,15 @@ def test_three_unplayed_take_the_first_two_of_the_next_lap():
     assert buffer_ids(rows, 5, aired) == ["f", "g", "h", "a", "b"]
 
 
+def test_on_air_does_not_take_a_buffer_slot():
+    rows = [_row(video_id, order, status="playing" if video_id == "a" else "pending")
+            for order, video_id in enumerate("abcdef", 1)]
+    assert buffer_ids(rows, 5, set(), on_air="a") == ["b", "c", "d", "e", "f"]
+    assert retain_ids(rows, 5, set(), on_air="a") == {"a", "b", "c", "d", "e", "f"}
+    # Status playing without OBS on that file still takes a slot.
+    assert buffer_ids(rows, 5, set(), on_air="")[0] == "a"
+
+
 def test_on_air_stays_when_it_is_outside_the_window():
     rows = [
         _row("b", 2),

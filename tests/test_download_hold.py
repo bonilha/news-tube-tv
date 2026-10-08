@@ -181,7 +181,7 @@ def test_keep_loop_does_not_start_the_next_id_after_hold(monkeypatch, tmp_path):
     _reset_hold()
 
     try:
-        asyncio.run(dl._download_keep(["aaaaaaaaaaa", "bbbbbbbbbbb"]))
+        asyncio.run(dl._download_keep(["aaaaaaaaaaa", "bbbbbbbbbbb"], dl.play_order_generation()))
     finally:
         _reset_hold()
     assert started == ["aaaaaaaaaaa"]

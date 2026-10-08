@@ -23,10 +23,20 @@ def _instance_down(exc: InvidiousError) -> bool:
 # One maintenance at a time. Callers of the same kind share that run's result.
 _maintain_lock = asyncio.Lock()
 _maintain_current: tuple[str, asyncio.Task] | None = None
+_maintain_last_run: float | None = None
+_maintain_last_stats: dict | None = None
+# Invidious scans from startup, the 15-minute loop, and a channel add.
+_scan_lock = asyncio.Lock()
+_MIN_MAINTAIN_GAP = 60
 
 
 async def scan_all_channels() -> dict[str, int]:
     """Scan every active channel and insert eligible videos. Returns stats."""
+    async with _scan_lock:
+        return await _scan_all_channels()
+
+
+async def _scan_all_channels() -> dict[str, int]:
     await queue_download.purge_members_videos()
     added = 0
     skipped = 0
@@ -73,34 +83,39 @@ async def _scan_channel(
     skipped = 0
     now = int(time.time())
 
+    # The read is its own transaction. video_title talks to Invidious and must
+    # not run while this process holds a write lock, or the 15s scheduler hits
+    # "database is locked".
     async with get_db() as db:
         cursor = await db.execute("SELECT COALESCE(MAX(play_order), 0) FROM queue")
         next_order = int((await cursor.fetchone())[0] or 0)
-        for raw in videos:
-            meta = invidious.normalize_video(raw)
-            eligible, reason = invidious.is_eligible(
-                meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
-            )
-            if not eligible:
-                skipped += 1
-                continue
-            listed = meta["title"]
-            detail_title, meta["max_height"], members = await invidious.video_title(
-                meta["video_id"], "",
-            )
-            if members:
-                await queue_download.delete_queue_video(meta["video_id"])
-                skipped += 1
-                continue
-            if members is None or not detail_title:
-                # The channel list title is the original language. Do not store
-                # it when the localized video endpoint did not answer.
-                skipped += 1
-                continue
-            meta["title"] = detail_title
+        await db.commit()
 
-            try:
-                play_order = next_order + 1 if next_order > 0 else 0
+    for raw in videos:
+        meta = invidious.normalize_video(raw)
+        eligible, _reason = invidious.is_eligible(
+            meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
+        )
+        if not eligible:
+            skipped += 1
+            continue
+        detail_title, meta["max_height"], members = await invidious.video_title(
+            meta["video_id"], "",
+        )
+        if members:
+            await queue_download.delete_queue_video(meta["video_id"])
+            skipped += 1
+            continue
+        if members is None or not detail_title:
+            # The channel list title is the original language. Do not store
+            # it when the localized video endpoint did not answer.
+            skipped += 1
+            continue
+        meta["title"] = detail_title
+
+        try:
+            play_order = next_order + 1 if next_order > 0 else 0
+            async with get_db() as db:
                 cursor = await db.execute(
                     """INSERT OR IGNORE INTO queue
                        (channel_id, video_id, title, author, duration, published_unix, thumb, play_order, max_height)
@@ -122,20 +137,18 @@ async def _scan_channel(
                 if cursor.rowcount:
                     next_order = play_order
                 inserted = bool(cursor.rowcount)
-                # Refresh title and thumb on videos already queued.
                 await db.execute(
                     "UPDATE queue SET title = ?, thumb = ?, max_height = ? WHERE video_id = ?",
                     (meta["title"], meta["thumb"], int(meta.get("max_height") or 0), meta["video_id"]),
                 )
-                if inserted:
-                    added += 1
-                else:
-                    skipped += 1
-            except Exception:
-                log.debug("Duplicate or error for %s", meta.get("video_id"))
+                await db.commit()
+            if inserted:
+                added += 1
+            else:
                 skipped += 1
-
-        await db.commit()
+        except Exception:
+            log.debug("Duplicate or error for %s", meta.get("video_id"))
+            skipped += 1
 
     return added, skipped
 
@@ -228,22 +241,43 @@ async def mark_status_by_video_id(video_id: str, status: str) -> bool:
     return True
 
 
+async def release_stuck_playing() -> int:
+    """A row left as playing after OBS or the cycle stopped becomes pending again.
+
+    Status playing is not the file on air. The download window only keeps the
+    id OBS is playing out of the five slots. A leftover playing row was exempt
+    from the 24h purge and could sit in front of the queue.
+    """
+    async with get_db() as db:
+        cursor = await db.execute(
+            "UPDATE queue SET status = 'pending' WHERE status = 'playing'"
+        )
+        count = cursor.rowcount
+        await db.commit()
+    return count
+
+
 async def rotate_video_to_end(video_id: str) -> None:
     """Move a finished video to the end of the play_order queue (round-robin).
 
     Increments play_count, resets status to 'pending', and assigns the highest
     play_order so the video goes to the back of the line.
+
+    Commits the transaction before scheduling sync so the buffer sees the new
+    play_order. The order generation makes an in-flight sync drop that snapshot.
     """
-    async with get_db() as db:
-        cursor = await db.execute("SELECT COALESCE(MAX(play_order), 0) FROM queue")
-        row = await cursor.fetchone()
-        max_order = row[0] if row else 0
-        await db.execute(
-            "UPDATE queue SET play_order = ?, status = 'pending', play_count = play_count + 1 "
-            "WHERE video_id = ?",
-            (max_order + 1, video_id),
-        )
-        await db.commit()
+    async with queue_download.play_order_lock:
+        queue_download.note_play_order_changing()
+        async with get_db() as db:
+            cursor = await db.execute("SELECT COALESCE(MAX(play_order), 0) FROM queue")
+            row = await cursor.fetchone()
+            max_order = row[0] if row else 0
+            await db.execute(
+                "UPDATE queue SET play_order = ?, status = 'pending', play_count = play_count + 1 "
+                "WHERE video_id = ?",
+                (max_order + 1, video_id),
+            )
+            await db.commit()
     queue_download.schedule_sync()
 
 
@@ -320,14 +354,31 @@ async def _run_maintenance(key: str, factory: Callable[[], Awaitable[dict]]) -> 
 
 
 async def maintain_queue() -> dict[str, int]:
-    """Scan every active channel, then expire videos older than 24h."""
+    """Scan every active channel, then expire videos older than 24h.
+
+    A second call within 60s returns the stats of the scan that just finished.
+    The same in-flight scan is shared, so two callers do not hit Invidious twice.
+    """
+    global _maintain_last_run, _maintain_last_stats
+    if (
+        _maintain_last_stats is not None
+        and _maintain_last_run is not None
+        and time.monotonic() - _maintain_last_run < _MIN_MAINTAIN_GAP
+    ):
+        log.info("Scan de canais ignorado: o anterior terminou há menos de 60s")
+        return dict(_maintain_last_stats)
+
     async def _body() -> dict[str, int]:
         stats = await scan_all_channels()
         stats["expired"] = await expire_old_videos()
+        stats["permanent_errors_removed"] = await queue_download.purge_permanent_errors()
         queue_download.schedule_sync()
         return stats
 
-    return await _run_maintenance("all", _body)
+    result = await _run_maintenance("all", _body)
+    _maintain_last_run = time.monotonic()
+    _maintain_last_stats = dict(result)
+    return result
 
 
 async def maintain_channel(
@@ -338,7 +389,8 @@ async def maintain_channel(
         added = skipped = errors = 0
         error = ""
         try:
-            added, skipped = await _scan_channel(channel_id, min_age_hours, channel_name)
+            async with _scan_lock:
+                added, skipped = await _scan_channel(channel_id, min_age_hours, channel_name)
         except InvidiousError as exc:
             errors = 1
             if _instance_down(exc):
@@ -400,6 +452,7 @@ async def startup_broadcast_queue() -> dict[str, int]:
     if not queue_download.downloads_held():
         queue_download.hold_downloads()
     try:
+        await release_stuck_playing()
         await queue_download.discard_all_downloads()
         stats = await scan_all_channels()
         stats["expired"] = await expire_old_videos()
@@ -517,26 +570,34 @@ def _insert_channel(sequence: list[int], channel_id: int, extra: int) -> list[in
 
 
 async def shuffle_play_order(*, reset_files: bool = False) -> int:
-    """Shuffle play_order for all queue items. Returns count of items shuffled."""
-    async with get_db() as db:
-        cursor = await db.execute(
-            "SELECT id, channel_id, max_height, play_count FROM queue"
-        )
-        rows = [
-            (
-                row["id"],
-                row["channel_id"],
-                int(row["max_height"] or 0),
-                int(row["play_count"] or 0),
+    """Shuffle play_order for all queue items. Returns count of items shuffled.
+
+    The whole order is committed while sync cannot read or delete from an older
+    snapshot. Sync that already started a download stops on the next id.
+    """
+    async with queue_download.play_order_lock:
+        queue_download.note_play_order_changing()
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT id, channel_id, max_height, play_count FROM queue"
             )
-            for row in await cursor.fetchall()
-        ]
-        if not rows:
-            return 0
-        ordered = shuffle_ids(rows, settings.QUEUE_DOWNLOAD_KEEP)
-        for position, queue_id in enumerate(ordered, 1):
-            await db.execute("UPDATE queue SET play_order = ? WHERE id = ?", (position, queue_id))
-        await db.commit()
+            rows = [
+                (
+                    row["id"],
+                    row["channel_id"],
+                    int(row["max_height"] or 0),
+                    int(row["play_count"] or 0),
+                )
+                for row in await cursor.fetchall()
+            ]
+            if not rows:
+                return 0
+            ordered = shuffle_ids(rows, settings.QUEUE_DOWNLOAD_KEEP)
+            await db.executemany(
+                "UPDATE queue SET play_order = ? WHERE id = ?",
+                [(position, queue_id) for position, queue_id in enumerate(ordered, 1)],
+            )
+            await db.commit()
     if reset_files:
         await queue_download.discard_all_downloads()
     return len(rows)

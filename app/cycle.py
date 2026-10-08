@@ -717,6 +717,7 @@ class CycleManager:
             self._protect()
             queue_download.note_on_air("")
             queue_download.hold_player_release(False)
+            await queue_svc.release_stuck_playing()
             await overlay.hide()
             log.info("Cycle stopped")
 

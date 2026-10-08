@@ -102,6 +102,9 @@ class FakeQueue:
     async def maintain_queue(self):
         return {}
 
+    async def release_stuck_playing(self):
+        return 0
+
 
 class FakeCookies:
     def status(self):
