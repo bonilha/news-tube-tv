@@ -2,12 +2,19 @@
 
 import asyncio
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 
 import pytest
 
+from app import broadcast as broadcast_mod
 from app import cycle as cycle_mod
-from app.broadcast import decide, validate_schedule
+from app.broadcast import (
+    current_limit_seconds,
+    decide,
+    save_limit_seconds,
+    validate_schedule,
+)
 from app.cycle import SCENE_BUMPER, SCENE_PROGRAM, CycleManager
 from app.queue.download import buffer_ids
 from tests.test_cycle_skip import FakeCookies, FakeDownload, FakeObs, FakeOverlay, FakeQueue, _row
@@ -123,6 +130,45 @@ def test_once_in_the_past_without_arm_turns_off():
 def test_schedule_form_rejects_a_past_date():
     with pytest.raises(ValueError):
         validate_schedule("once", "08:00", "2020-01-01", datetime(2026, 10, 3, 12, 0))
+
+
+def _limit_db(monkeypatch, saved):
+    class Db:
+        async def execute(self, _sql, params=()):
+            saved.append(params)
+
+        async def commit(self):
+            pass
+
+    @asynccontextmanager
+    async def get_db():
+        yield Db()
+
+    monkeypatch.setattr(broadcast_mod, "get_db", get_db)
+
+
+def test_continuous_zero_and_the_grid_bounds_are_saved(monkeypatch):
+    saved = []
+    _limit_db(monkeypatch, saved)
+    asyncio.run(save_limit_seconds(0))
+    asyncio.run(save_limit_seconds(1800))
+    asyncio.run(save_limit_seconds(86400))
+    assert saved == [(0,), (1800,), (86400,)]
+
+
+def test_values_outside_the_grid_are_refused(monkeypatch):
+    _limit_db(monkeypatch, [])
+    for seconds in (1799, 86460, -1800):
+        with pytest.raises(ValueError):
+            asyncio.run(save_limit_seconds(seconds))
+
+
+def test_a_zero_limit_reads_back_as_continuous(monkeypatch):
+    async def control():
+        return {"limit_seconds": 0}
+
+    monkeypatch.setattr(broadcast_mod, "get_control", control)
+    assert asyncio.run(current_limit_seconds()) == 0
 
 
 def test_disabled_channel_is_outside_the_five():

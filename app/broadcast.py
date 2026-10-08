@@ -195,8 +195,9 @@ def validate_schedule(mode: str, time_text: str, date_text: str, now: datetime) 
 
 
 async def current_limit_seconds() -> int:
+    """Seconds on air before the graceful stop. 0 means continuous."""
     row = await get_control()
-    return int(row.get("limit_seconds") or DEFAULT_LIMIT_SECONDS)
+    return int(row.get("limit_seconds") or 0)
 
 
 async def get_control() -> dict:
@@ -214,10 +215,11 @@ async def get_control() -> dict:
     return dict(row)
 
 
-async def save_limit_hours(hours: float) -> None:
-    if hours <= 0:
-        raise ValueError("A duração tem de ser maior que zero.")
-    seconds = int(round(float(hours) * 3600))
+async def save_limit_seconds(seconds: int) -> None:
+    """0 means continuous; otherwise 30 min to 24 h."""
+    seconds = int(seconds)
+    if seconds != 0 and not (30 * 60 <= seconds <= 24 * 60 * 60):
+        raise ValueError("A duração tem de ser de 30 minutos a 24 horas, ou contínua.")
     async with get_db() as db:
         await db.execute(
             "UPDATE broadcast_control SET limit_seconds = ? WHERE id = 1",

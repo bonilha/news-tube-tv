@@ -9,7 +9,7 @@ from urllib.parse import quote
 from fastapi.templating import Jinja2Templates
 
 from app.auth import verify_credentials
-from app.broadcast import format_hm, get_control, save_limit_hours, start_transmission
+from app.broadcast import format_hm, get_control, save_limit_seconds, start_transmission
 from app.cycle import cycle_manager
 from app.obs.manager import obs_manager, ALL_SCENES, SCENE_DESCRIPTIONS
 from app.queue import service as queue_svc
@@ -84,9 +84,10 @@ async def dashboard_live(request: Request, _auth: bool = Depends(verify_credenti
         "cycle": cycle,
         "queue_ready": await queue_svc.broadcast_ready(),
         "control": control,
-        "limit_hours": limit / 3600 if limit else 12,
+        "limit_seconds": limit,
+        "limit_options": [(m * 1800, format_hm(m * 1800)) for m in range(1, 49)] + [(0, "Contínuo")],
         "elapsed_label": format_hm(cycle.get("on_air_seconds") or 0),
-        "limit_label": format_hm(limit),
+        "limit_label": format_hm(limit) if limit else "Contínuo",
     })
 
 
@@ -117,11 +118,11 @@ async def api_finish_streaming(_auth: bool = Depends(verify_credentials)):
 
 @router.post("/api/broadcast/limit", response_class=JSONResponse)
 async def api_broadcast_limit(
-    hours: float = Form(...),
+    seconds: int = Form(...),
     _auth: bool = Depends(verify_credentials),
 ):
     try:
-        await save_limit_hours(hours)
+        await save_limit_seconds(seconds)
     except ValueError as exc:
         return JSONResponse({"ok": False, "error": str(exc)})
     return JSONResponse({"ok": True})
