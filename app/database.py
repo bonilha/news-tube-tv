@@ -43,7 +43,8 @@ CREATE TABLE IF NOT EXISTS broadcast_control (
     schedule_time TEXT NOT NULL DEFAULT '',
     schedule_date TEXT NOT NULL DEFAULT '',
     last_fired_on TEXT NOT NULL DEFAULT '',
-    armed_for TEXT NOT NULL DEFAULT ''
+    armed_for TEXT NOT NULL DEFAULT '',
+    audio_normalize INTEGER NOT NULL DEFAULT 1
 );
 
 CREATE TABLE IF NOT EXISTS queue (
@@ -114,6 +115,12 @@ async def init_db() -> None:
         if "retry_count" not in columns:
             await db.execute(
                 "ALTER TABLE queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
+            )
+        cursor = await db.execute("PRAGMA table_info(broadcast_control)")
+        control_columns = {row[1] for row in await cursor.fetchall()}
+        if "audio_normalize" not in control_columns:
+            await db.execute(
+                "ALTER TABLE broadcast_control ADD COLUMN audio_normalize INTEGER NOT NULL DEFAULT 1"
             )
         await db.execute(
             "INSERT OR IGNORE INTO broadcast_control (id, limit_seconds) VALUES (1, 0)"

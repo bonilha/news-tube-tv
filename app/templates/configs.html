@@ -86,6 +86,20 @@
     <button type="submit" class="btn btn-ghost">Pegar cookies do Edge</button>
 </form>
 
+<form method="post" action="/configs/audio"
+      hx-post="/configs/audio" hx-target="#content" hx-swap="innerHTML" class="card mt-2">
+    <h2 class="mb-2">Áudio</h2>
+    <p class="text-sm text-muted mb-2">Os próximos downloads ficam no mesmo volume médio (−14 LUFS). Vídeos que já estão na fila não são refeitos.</p>
+    {% if audio_saved %}
+    <div class="mb-2" style="color:var(--success-color)">Áudio salvo.</div>
+    {% endif %}
+    <label class="mr-2">
+        <input type="checkbox" name="audio_normalize" value="1" {% if control.audio_normalize %}checked{% endif %}>
+        Normalizar áudio
+    </label>
+    <button type="submit" class="btn btn-ghost">Salvar</button>
+</form>
+
 <form method="post" action="/configs/schedule"
       hx-post="/configs/schedule" hx-target="#content" hx-swap="innerHTML" class="card mt-2">
     <h2 class="mb-2">Agendamento</h2>

@@ -215,6 +215,24 @@ async def get_control() -> dict:
     return dict(row)
 
 
+async def audio_normalize_enabled() -> bool:
+    """True unless Configs turned loudness normalization off. Missing means on."""
+    row = await get_control()
+    value = row.get("audio_normalize")
+    if value is None:
+        return True
+    return bool(int(value))
+
+
+async def save_audio_normalize(enabled: bool) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE broadcast_control SET audio_normalize = ? WHERE id = 1",
+            (1 if enabled else 0,),
+        )
+        await db.commit()
+
+
 async def save_limit_seconds(seconds: int) -> None:
     """0 means continuous; otherwise 30 min to 24 h."""
     seconds = int(seconds)

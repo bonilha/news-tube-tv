@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -10,6 +11,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from app.broadcast import audio_normalize_enabled
 from app.config import settings
 from app.database import get_db
 from app.queue import cookies as yt_cookies
@@ -38,6 +40,9 @@ _ENCODERS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
 # A stalled YouTube connection must not hold the download lock until the process dies.
 _SOCKET_TIMEOUT_SEC = 30
 _LATE = "Não ficou pronto no prazo da fila"
+# Integrated loudness for the next downloads. One gain for the whole file.
+_LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
+_LOUDNORM_KEYS = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
 
 
 def downloads_dir() -> Path:
@@ -524,7 +529,7 @@ async def sync_downloads() -> None:
     elif not yt_cookies.ensure_fresh():
         log.warning("Skipping downloads: %s", yt_cookies.status()["message"])
     else:
-        await _download_keep(keep, generation)
+        await _download_keep(keep, generation, await audio_normalize_enabled())
 
     if downloads_held() or play_order_generation() != generation:
         schedule_sync()
@@ -540,7 +545,7 @@ async def sync_downloads() -> None:
     await remove_files(doomed)
 
 
-async def _download_keep(keep: list[str], generation: int) -> None:
+async def _download_keep(keep: list[str], generation: int, normalize: bool = True) -> None:
     """Download MP4s for the window. Missing files do not keep other ids on disk.
 
     A shuffle that commits a new play_order stops this list. The follow-up sync
@@ -563,7 +568,7 @@ async def _download_keep(keep: list[str], generation: int) -> None:
             continue
         if raw_download(video_id):
             try:
-                await asyncio.to_thread(_place_in_queue, video_id)
+                await asyncio.to_thread(_place_in_queue, video_id, normalize)
             except Exception as exc:
                 log.exception("Could not move %s into the queue folder", video_id)
                 await _store_error(video_id, str(exc)[:300])
@@ -583,7 +588,7 @@ async def _download_keep(keep: list[str], generation: int) -> None:
         budget = ready_wait_seconds(await _queue_rows(), _on_air_id)
         _current_download = video_id
         try:
-            await _run_download(video_id, budget)
+            await _run_download(video_id, budget, normalize)
         except TimeoutError:
             log.error("Download missed the queue deadline for %s", video_id)
             _abandoned.add(video_id)
@@ -812,7 +817,109 @@ def _run_ffmpeg(source: Path, dest: Path, args: list[str]) -> None:
         raise RuntimeError(err[-400:] or "ffmpeg produced no MP4")
 
 
-def _place_in_queue(video_id: str) -> None:
+def loudnorm_measure_args() -> list[str]:
+    """Audio-only first pass. Video is not encoded here."""
+    return ["-vn", "-af", f"{_LOUDNORM}:print_format=json", "-f", "null", "-"]
+
+
+def _loudnorm_apply(measured: dict) -> str:
+    """Second pass: one linear gain from the measured file, then AAC."""
+    return (
+        f"{_LOUDNORM}"
+        f":measured_I={measured['input_i']}"
+        f":measured_TP={measured['input_tp']}"
+        f":measured_LRA={measured['input_lra']}"
+        f":measured_thresh={measured['input_thresh']}"
+        f":offset={measured['target_offset']}"
+        ":linear=true"
+    )
+
+
+def _measured_loudness(payload: dict) -> dict | None:
+    if any(key not in payload for key in _LOUDNORM_KEYS):
+        return None
+    if any(str(payload[key]) in {"inf", "-inf", "nan"} for key in _LOUDNORM_KEYS):
+        return None
+    return {key: payload[key] for key in _LOUDNORM_KEYS}
+
+
+def placement_action(
+    *,
+    video_codec: str,
+    audio_codec: str,
+    suffix: str,
+    needs_scale: bool,
+    normalize: bool,
+    measured: dict | None,
+    encoder: str,
+    encoder_args: tuple[str, ...],
+    scale_filter: str,
+) -> str | list[str]:
+    """'move' when the file can be renamed. Otherwise the ffmpeg output args.
+
+    Loudness on means the audio is always re-encoded. The video stays copied
+    when the old path copied it or only renamed the file.
+    """
+    audio_out = None
+    if normalize and measured:
+        audio_out = ["-af", _loudnorm_apply(measured), "-c:a", "aac", "-b:a", "160k"]
+    if (
+        not needs_scale
+        and video_codec == "h264"
+        and audio_codec == "aac"
+        and suffix.lower() == ".mp4"
+    ):
+        if audio_out is None:
+            return "move"
+        return ["-c:v", "copy", *audio_out]
+    if needs_scale:
+        if not encoder:
+            raise RuntimeError("no H.264 encoder to scale to Full HD")
+        if audio_out is None:
+            audio = ["-c:a", "copy"] if audio_codec == "aac" else ["-c:a", "aac", "-b:a", "160k"]
+        else:
+            audio = audio_out
+        return ["-vf", scale_filter, "-c:v", encoder, *encoder_args, *audio]
+    if video_codec in {"", "h264"} and audio_codec in {"", "aac"}:
+        if audio_out is None:
+            return ["-c", "copy"]
+        return ["-c:v", "copy", *audio_out]
+    if video_codec == "h264":
+        return ["-c:v", "copy", *(audio_out or ["-c:a", "aac", "-b:a", "160k"])]
+    if not encoder:
+        raise RuntimeError(f"no H.264 encoder for codec {video_codec or 'unknown'}")
+    return ["-c:v", encoder, *encoder_args, *(audio_out or ["-c:a", "aac", "-b:a", "160k"])]
+
+
+def _measure_loudness(source: Path) -> dict | None:
+    """Read integrated loudness. None leaves the file on the path it already had."""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-nostats",
+        "-i", str(source), *loudnorm_measure_args(),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True)
+    except OSError as exc:
+        log.warning("Loudness measure failed for %s: %s", source.name, exc)
+        return None
+    text = (result.stderr or b"").decode("utf-8", "replace")
+    start = text.rfind("{")
+    end = text.rfind("}")
+    if start < 0 or end < start:
+        log.warning("Loudness measure returned no JSON for %s", source.name)
+        return None
+    try:
+        payload = json.loads(text[start:end + 1])
+    except json.JSONDecodeError:
+        log.warning("Loudness measure returned broken JSON for %s", source.name)
+        return None
+    measured = _measured_loudness(payload)
+    if measured is None:
+        log.warning("Loudness measure was not usable for %s", source.name)
+    return measured
+
+
+def _place_in_queue(video_id: str, normalize: bool = False) -> None:
     """Move or encode the downloaded file into videos/queue. Runs after yt-dlp."""
     if video_id in _abandoned:
         return
@@ -829,46 +936,44 @@ def _place_in_queue(video_id: str) -> None:
         video_id, video_codec or "?", audio_codec or "?", source.suffix,
         width or "?", height or "?",
     )
-    if (
-        not needs_scale
-        and video_codec == "h264"
-        and audio_codec == "aac"
-        and source.suffix.lower() == ".mp4"
-    ):
+    measured = _measure_loudness(source) if normalize else None
+    if normalize and measured is None:
+        log.warning("Keeping the original audio path for %s", video_id)
+    action = placement_action(
+        video_codec=video_codec,
+        audio_codec=audio_codec,
+        suffix=source.suffix,
+        needs_scale=needs_scale,
+        normalize=normalize,
+        measured=measured,
+        encoder=_encoder or "",
+        encoder_args=_encoder_args,
+        scale_filter=_scale_filter(),
+    )
+    if action == "move":
         log.info("Already H.264 + AAC in MP4, moving to queue: %s", video_id)
         if source.resolve() != final.resolve():
             final.parent.mkdir(parents=True, exist_ok=True)
             source.replace(final)
         return
     if needs_scale:
-        if not _encoder:
-            raise RuntimeError("no H.264 encoder to scale to Full HD")
         log.info("Scale %sx%s to %sx%s: %s", width, height, target[0], target[1], video_id)
-        audio = ["-c:a", "copy"] if audio_codec == "aac" else ["-c:a", "aac", "-b:a", "160k"]
-        args = ["-vf", _scale_filter(), "-c:v", _encoder, *_encoder_args, *audio]
-    elif video_codec in {"", "h264"} and audio_codec in {"", "aac"}:
-        log.info("Remux only: %s", video_id)
-        args = ["-c", "copy"]
-    elif video_codec == "h264":
-        log.info("Copy video, encode audio to AAC: %s", video_id)
-        args = ["-c:v", "copy", "-c:a", "aac", "-b:a", "160k"]
+    elif video_codec == "h264" and "-c:v" in action and action[action.index("-c:v") + 1] == "copy":
+        log.info("Copy video, encode audio: %s", video_id)
     else:
-        if not _encoder:
-            raise RuntimeError(f"no H.264 encoder for codec {video_codec or 'unknown'}")
-        log.info("Encode video to H.264 because codec is %s: %s", video_codec, video_id)
-        args = ["-c:v", _encoder, *_encoder_args, "-c:a", "aac", "-b:a", "160k"]
+        log.info("Encode video to H.264 because codec is %s: %s", video_codec or "?", video_id)
     if video_id in _abandoned:
         return
     temp = downloads_dir() / f"{video_id}.encode.mp4"
     if temp.exists():
         temp.unlink()
-    _run_ffmpeg(source, temp, args)
+    _run_ffmpeg(source, temp, action)
     temp.replace(final)
     if source.exists() and source.resolve() != final.resolve():
         source.unlink()
 
 
-async def _run_download(video_id: str, budget: float) -> None:
+async def _run_download(video_id: str, budget: float, normalize: bool = False) -> None:
     """Download one id. A positive budget is the deadline; zero waits it out.
 
     Zero is an empty buffer. Capping that at zero seconds would stop the queue
@@ -876,12 +981,14 @@ async def _run_download(video_id: str, budget: float) -> None:
     """
     _abandoned.discard(video_id)
     if budget > 0:
-        await asyncio.wait_for(asyncio.to_thread(_download_mp4, video_id), timeout=budget)
+        await asyncio.wait_for(
+            asyncio.to_thread(_download_mp4, video_id, normalize), timeout=budget,
+        )
         return
-    await asyncio.to_thread(_download_mp4, video_id)
+    await asyncio.to_thread(_download_mp4, video_id, normalize)
 
 
-def _download_mp4(video_id: str) -> None:
+def _download_mp4(video_id: str, normalize: bool = False) -> None:
     import yt_dlp
 
     ensure_video_dirs()
@@ -921,7 +1028,7 @@ def _download_mp4(video_id: str) -> None:
         return
     # yt-dlp moves the file to the outtmpl after its own postprocessors.
     # Placing it in queue has to happen after that, or it is moved back.
-    _place_in_queue(video_id)
+    _place_in_queue(video_id, normalize)
 
 
 async def discard_all_downloads() -> None:

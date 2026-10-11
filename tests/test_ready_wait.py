@@ -48,7 +48,7 @@ def test_a_missed_deadline_moves_on_to_the_next_id(monkeypatch, tmp_path):
     async def store_error(video_id, message):
         seen.append(("error", video_id, message))
 
-    async def run_download(video_id, budget):
+    async def run_download(video_id, budget, _normalize=True):
         seen.append(("download", video_id, budget))
         if video_id == "late":
             raise TimeoutError
@@ -60,7 +60,7 @@ def test_a_missed_deadline_moves_on_to_the_next_id(monkeypatch, tmp_path):
     monkeypatch.setattr(dl, "remove_files", lambda paths: _noop())
     monkeypatch.setattr(dl, "_run_download", run_download)
 
-    asyncio.run(dl._download_keep(["late", "next"]))
+    asyncio.run(dl._download_keep(["late", "next"], dl.play_order_generation()))
 
     assert ("download", "late", 12) in seen
     assert ("error", "late", dl._LATE) in seen

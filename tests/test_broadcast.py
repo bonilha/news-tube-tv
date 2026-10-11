@@ -181,6 +181,7 @@ def test_a_new_database_starts_continuous(monkeypatch, tmp_path):
         await init_db()
         row = await broadcast_mod.get_control()
         assert row["limit_seconds"] == 0
+        assert row["audio_normalize"] == 1
         assert await current_limit_seconds() == 0
         await save_limit_seconds(1800)
         assert await current_limit_seconds() == 1800

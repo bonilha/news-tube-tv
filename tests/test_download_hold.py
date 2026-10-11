@@ -161,7 +161,7 @@ def test_keep_loop_does_not_start_the_next_id_after_hold(monkeypatch, tmp_path):
             "download_error": "",
         }
 
-    async def run_download(video_id, _budget):
+    async def run_download(video_id, _budget, _normalize=True):
         started.append(video_id)
         dl.hold_downloads()
 

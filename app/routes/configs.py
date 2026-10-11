@@ -8,7 +8,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 
 from app.auth import verify_credentials
-from app.broadcast import get_control, save_schedule
+from app.broadcast import get_control, save_audio_normalize, save_schedule
 from app.obs.services import locate_services_file
 from app.obs.stream_config import get_stream_config, save_stream_config, services_for
 from app.queue import cookies as yt_cookies
@@ -119,6 +119,19 @@ async def configs_cookies_edge(
         ctx["cookie_saved"] = True
     else:
         ctx["cookie_error"] = state["message"]
+    return _html(request, ctx)
+
+
+@router.post("/configs/audio", response_class=HTMLResponse)
+async def configs_audio(
+    request: Request,
+    audio_normalize: str = Form("0"),
+    _auth: bool = Depends(verify_credentials),
+):
+    await save_audio_normalize(audio_normalize == "1")
+    config = await get_stream_config()
+    ctx = await _page_context(config)
+    ctx["audio_saved"] = True
     return _html(request, ctx)
 
 
