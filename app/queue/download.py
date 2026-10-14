@@ -15,8 +15,19 @@ from app.broadcast import audio_normalize_enabled
 from app.config import settings
 from app.database import get_db
 from app.queue import cookies as yt_cookies
+from app.queue import sponsorblock
 
 log = logging.getLogger(__name__)
+
+
+def say(message: str) -> None:
+    """Operator line. Stays visible when the process log level is warning."""
+    print(f"NewsTube {message}", flush=True)
+
+
+def _label(row: dict | None, video_id: str) -> str:
+    title = " ".join(str((row or {}).get("title") or "").split())
+    return title or video_id
 
 # A YouTube video id. Anything else on disk is not ours to delete.
 _VIDEO_ID = re.compile(r"[A-Za-z0-9_-]{11}")
@@ -489,7 +500,7 @@ def _downloadable(row: dict) -> bool:
 async def _one_row(video_id: str) -> dict | None:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT video_id, status, published_unix, local_path, duration FROM queue WHERE video_id = ?",
+            "SELECT video_id, title, status, published_unix, local_path, duration FROM queue WHERE video_id = ?",
             (video_id,),
         )
         row = await cursor.fetchone()
@@ -566,9 +577,10 @@ async def _download_keep(keep: list[str], generation: int, normalize: bool = Tru
         if final.exists() and final.stat().st_size > 0:
             await _store_path(video_id, final)
             continue
+        label = _label(current, video_id)
         if raw_download(video_id):
             try:
-                await asyncio.to_thread(_place_in_queue, video_id, normalize)
+                await asyncio.to_thread(_place_in_queue, video_id, normalize, label)
             except Exception as exc:
                 log.exception("Could not move %s into the queue folder", video_id)
                 await _store_error(video_id, str(exc)[:300])
@@ -588,7 +600,7 @@ async def _download_keep(keep: list[str], generation: int, normalize: bool = Tru
         budget = ready_wait_seconds(await _queue_rows(), _on_air_id)
         _current_download = video_id
         try:
-            await _run_download(video_id, budget, normalize)
+            await _run_download(video_id, budget, normalize, label)
         except TimeoutError:
             log.error("Download missed the queue deadline for %s", video_id)
             _abandoned.add(video_id)
@@ -919,23 +931,33 @@ def _measure_loudness(source: Path) -> dict | None:
     return measured
 
 
-def _place_in_queue(video_id: str, normalize: bool = False) -> None:
+def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> None:
     """Move or encode the downloaded file into videos/queue. Runs after yt-dlp."""
     if video_id in _abandoned:
         return
-    source = raw_download(video_id)
-    if source is None:
+    shown = label or video_id
+    original = raw_download(video_id)
+    if original is None:
         raise RuntimeError("yt-dlp did not leave a finished file in downloads")
+    source = original
+    sponsor_file: Path | None = None
+    if not settings.SPONSORBLOCK:
+        say("SponsorBlock: desligado")
+    elif video_id not in _abandoned:
+        sponsor_file = downloads_dir() / f"{video_id}.sponsor.mp4"
+        if sponsor_file.exists():
+            sponsor_file.unlink()
+        cut, status = sponsorblock.prepare_source(video_id, original, sponsor_file)
+        say(status)
+        if cut is not None:
+            source = cut
     final = queue_file(video_id)
     video_codec, audio_codec = _codecs(source)
     width, height = _video_size(source)
     target = (settings.OBS_BASE_WIDTH, settings.OBS_BASE_HEIGHT)
     needs_scale = needs_video_scale(video_codec, width, height, target)
-    log.info(
-        "Downloaded %s video=%s audio=%s container=%s size=%sx%s",
-        video_id, video_codec or "?", audio_codec or "?", source.suffix,
-        width or "?", height or "?",
-    )
+    if normalize:
+        say(f"Medindo volume: {shown}")
     measured = _measure_loudness(source) if normalize else None
     if normalize and measured is None:
         log.warning("Keeping the original audio path for %s", video_id)
@@ -951,17 +973,19 @@ def _place_in_queue(video_id: str, normalize: bool = False) -> None:
         scale_filter=_scale_filter(),
     )
     if action == "move":
-        log.info("Already H.264 + AAC in MP4, moving to queue: %s", video_id)
+        say(f"Vídeo já está em H.264, movendo para a fila: {shown}")
         if source.resolve() != final.resolve():
             final.parent.mkdir(parents=True, exist_ok=True)
             source.replace(final)
+        _drop_sponsor_original(original, source, final)
+        say(f"Na fila: {shown}")
         return
     if needs_scale:
-        log.info("Scale %sx%s to %sx%s: %s", width, height, target[0], target[1], video_id)
+        say(f"Escalando para {target[0]}x{target[1]}: {shown}")
     elif video_codec == "h264" and "-c:v" in action and action[action.index("-c:v") + 1] == "copy":
-        log.info("Copy video, encode audio: %s", video_id)
+        say(f"Copiando vídeo e normalizando áudio: {shown}")
     else:
-        log.info("Encode video to H.264 because codec is %s: %s", video_codec or "?", video_id)
+        say(f"Recodificando para H.264: {shown}")
     if video_id in _abandoned:
         return
     temp = downloads_dir() / f"{video_id}.encode.mp4"
@@ -971,9 +995,19 @@ def _place_in_queue(video_id: str, normalize: bool = False) -> None:
     temp.replace(final)
     if source.exists() and source.resolve() != final.resolve():
         source.unlink()
+    _drop_sponsor_original(original, source, final)
+    say(f"Na fila: {shown}")
 
 
-async def _run_download(video_id: str, budget: float, normalize: bool = False) -> None:
+def _drop_sponsor_original(original: Path, source: Path, final: Path) -> None:
+    """Remove the yt-dlp file when the queued MP4 came from a sponsor cut."""
+    if source.resolve() == original.resolve():
+        return
+    if original.exists() and original.resolve() != final.resolve():
+        original.unlink()
+
+
+async def _run_download(video_id: str, budget: float, normalize: bool = False, label: str = "") -> None:
     """Download one id. A positive budget is the deadline; zero waits it out.
 
     Zero is an empty buffer. Capping that at zero seconds would stop the queue
@@ -982,13 +1016,13 @@ async def _run_download(video_id: str, budget: float, normalize: bool = False) -
     _abandoned.discard(video_id)
     if budget > 0:
         await asyncio.wait_for(
-            asyncio.to_thread(_download_mp4, video_id, normalize), timeout=budget,
+            asyncio.to_thread(_download_mp4, video_id, normalize, label), timeout=budget,
         )
         return
-    await asyncio.to_thread(_download_mp4, video_id, normalize)
+    await asyncio.to_thread(_download_mp4, video_id, normalize, label)
 
 
-def _download_mp4(video_id: str, normalize: bool = False) -> None:
+def _download_mp4(video_id: str, normalize: bool = False, label: str = "") -> None:
     import yt_dlp
 
     ensure_video_dirs()
@@ -1022,13 +1056,16 @@ def _download_mp4(video_id: str, normalize: bool = False) -> None:
 
     opts["progress_hooks"] = [_stop_when_held]
     url = f"https://www.youtube.com/watch?v={video_id}"
+    shown = label or video_id
+    say(f"Baixando {shown}")
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.download([url])
     if video_id in _abandoned:
         return
+    say(f"Download concluído: {shown}")
     # yt-dlp moves the file to the outtmpl after its own postprocessors.
     # Placing it in queue has to happen after that, or it is moved back.
-    _place_in_queue(video_id, normalize)
+    _place_in_queue(video_id, normalize, label)
 
 
 async def discard_all_downloads() -> None:

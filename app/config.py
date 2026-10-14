@@ -51,6 +51,9 @@ class Settings(BaseSettings):
     CYCLE_MAX_WAIT_MINUTES: int = 90
     # Stop starting a new download when the volume has less than this free.
     QUEUE_MIN_FREE_MB: int = 1024
+    # Cut community-marked sponsor reads out of the file before it is queued.
+    # 0 leaves every download whole. A failed lookup also leaves the file whole.
+    SPONSORBLOCK: int = 1
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
