@@ -15,6 +15,42 @@ from app.yt.invidious import InvidiousError
 
 log = logging.getLogger(__name__)
 
+_SKIP_KEYS = ("duration", "shorts", "age", "members")
+
+
+def _blank_skips() -> dict[str, int]:
+    return {key: 0 for key in _SKIP_KEYS}
+
+
+def _note_skip(reasons: dict[str, int], reason: str) -> None:
+    text = (reason or "").lower()
+    if "duração longa" in text:
+        reasons["duration"] += 1
+    elif "short" in text:
+        reasons["shorts"] += 1
+    elif "24h" in text or "novo demais" in text or "sem data" in text:
+        reasons["age"] += 1
+    elif "membro" in text or "members" in text:
+        reasons["members"] += 1
+
+
+def _scan_stats(added: int, skipped: int, errors: int, reasons: dict[str, int]) -> dict[str, int]:
+    stats = {
+        "added": added,
+        "skipped": skipped,
+        "errors": errors,
+        "skipped_duration": reasons.get("duration", 0),
+        "skipped_shorts": reasons.get("shorts", 0),
+        "skipped_age": reasons.get("age", 0),
+        "skipped_members": reasons.get("members", 0),
+    }
+    return stats
+
+
+def _add_reasons(total: dict[str, int], part: dict[str, int]) -> None:
+    for key in _SKIP_KEYS:
+        total[key] = total.get(key, 0) + part.get(key, 0)
+
 
 def _instance_down(exc: InvidiousError) -> bool:
     text = str(exc).lower()
@@ -41,6 +77,7 @@ async def _scan_all_channels() -> dict[str, int]:
     added = 0
     skipped = 0
     errors = 0
+    reasons = _blank_skips()
 
     async with get_db() as db:
         cursor = await db.execute(
@@ -50,26 +87,24 @@ async def _scan_all_channels() -> dict[str, int]:
 
     for ch in channels:
         try:
-            a, s = await _scan_channel(ch["channel_id"], ch["min_age_hours"], ch["name"])
+            a, s, part = await _scan_channel(ch["channel_id"], ch["min_age_hours"], ch["name"])
             added += a
             skipped += s
+            _add_reasons(reasons, part)
         except InvidiousError as exc:
             errors += 1
             if _instance_down(exc):
                 log.warning("Invidious indisponível; scan interrompido: %s", exc)
-                return {
-                    "added": added,
-                    "skipped": skipped,
-                    "errors": errors,
-                    "error": "Invidious indisponível. Nenhum canal foi consultado depois deste.",
-                }
+                stats = _scan_stats(added, skipped, errors, reasons)
+                stats["error"] = "Invidious indisponível. Nenhum canal foi consultado depois deste."
+                return stats
             log.warning("Canal %s não consultado: %s", ch["name"], exc)
         except Exception:
             log.exception("Error scanning channel %s (%s)", ch["name"], ch["channel_id"])
             errors += 1
 
     log.info("Scan complete: %d added, %d skipped, %d errors", added, skipped, errors)
-    return {"added": added, "skipped": skipped, "errors": errors}
+    return _scan_stats(added, skipped, errors, reasons)
 
 
 async def _channel_allows_shorts(channel_id: str) -> bool:
@@ -84,8 +119,8 @@ async def _channel_allows_shorts(channel_id: str) -> bool:
 
 async def _scan_channel(
     channel_id: str, min_age_hours: float, channel_name: str = "",
-) -> tuple[int, int]:
-    """Scan one channel. Returns (added, skipped)."""
+) -> tuple[int, int, dict[str, int]]:
+    """Scan one channel. Returns (added, skipped, skip reasons)."""
     allow_shorts = await _channel_allows_shorts(channel_id)
     videos = list(await invidious.channel_videos(channel_id, sort_by="newest"))
     shorts = await invidious.channel_shorts(channel_id) if allow_shorts else []
@@ -106,6 +141,7 @@ async def _scan_channel(
 
     added = 0
     skipped = 0
+    reasons = _blank_skips()
     now = int(time.time())
     video_ids = [
         str(item.get("videoId") or item.get("videoID") or "")
@@ -130,12 +166,13 @@ async def _scan_channel(
         # The shorts shelf sends published 0 and lengthSeconds 60. Judge type,
         # duration, and paid status from the list, then age from the video endpoint.
         missing_time = not meta.get("published")
-        eligible, _reason = invidious.is_eligible(
+        eligible, reason = invidious.is_eligible(
             meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
             allow_shorts=allow_shorts, defer_age=missing_time,
         )
         if not eligible:
             skipped += 1
+            _note_skip(reasons, reason)
             continue
         detail_title, meta["max_height"], members, detail_published, detail_length = await invidious.video_title(
             meta["video_id"], "",
@@ -143,6 +180,7 @@ async def _scan_channel(
         if members:
             await queue_download.delete_queue_video(meta["video_id"])
             skipped += 1
+            _note_skip(reasons, "Conteúdo exclusivo para membros")
             continue
         if members is None or not detail_title:
             # The channel list title is the original language. Do not store
@@ -155,13 +193,14 @@ async def _scan_channel(
         # A Google publishedAt is exact. Invidious "1 dia atrás" must not replace it.
         if detail_published and not google_stamp:
             meta["published"] = detail_published
-        still_ok, _reason = invidious.is_eligible(
+        still_ok, reason = invidious.is_eligible(
             meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
             allow_shorts=allow_shorts,
         )
         if not still_ok:
             await queue_download.delete_queue_video(meta["video_id"])
             skipped += 1
+            _note_skip(reasons, reason)
             continue
 
         try:
@@ -212,7 +251,7 @@ async def _scan_channel(
             log.debug("Duplicate or error for %s", meta.get("video_id"))
             skipped += 1
 
-    return added, skipped
+    return added, skipped, reasons
 
 
 # Before the first shuffle every play_order is 0 and the table stays
@@ -474,10 +513,11 @@ async def maintain_channel(
     """Scan one channel, then expire videos older than 24h."""
     async def _body() -> dict[str, int]:
         added = skipped = errors = 0
+        reasons = _blank_skips()
         error = ""
         try:
             async with _scan_lock:
-                added, skipped = await _scan_channel(channel_id, min_age_hours, channel_name)
+                added, skipped, reasons = await _scan_channel(channel_id, min_age_hours, channel_name)
         except InvidiousError as exc:
             errors = 1
             if _instance_down(exc):
@@ -489,12 +529,8 @@ async def maintain_channel(
         except Exception:
             log.exception("Error scanning channel %s (%s)", channel_name, channel_id)
             errors = 1
-        stats: dict = {
-            "added": added,
-            "skipped": skipped,
-            "errors": errors,
-            "expired": await expire_old_videos(),
-        }
+        stats: dict = _scan_stats(added, skipped, errors, reasons)
+        stats["expired"] = await expire_old_videos()
         if error:
             stats["error"] = error
         return stats

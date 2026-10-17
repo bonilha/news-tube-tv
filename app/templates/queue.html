@@ -1,6 +1,6 @@
 {% if not htmx %}{% extends "base.html" %}{% endif %}
 {% block content %}
-<h1 class="mb-2">Video Queue</h1>
+<h1 class="mb-2">Fila de Vídeos</h1>
 <p class="text-muted text-sm mb-2">
     H.264 + AAC{% if encoder %} ({{ encoder }} se precisar reencodar){% endif %}
     · MP4 dos primeiros {{ download_keep }} da fila
@@ -11,11 +11,11 @@
 <div class="flex gap-1 mb-2">
     <button class="btn btn-primary"
             hx-post="/queue/scan" hx-target="#queue-table" hx-swap="innerHTML">
-        ↻ Scan Channels
+        ↻ Escanear canais
     </button>
     <button class="btn btn-ghost"
             hx-post="/queue/expire" hx-target="#queue-table" hx-swap="innerHTML">
-        ⏰ Expire Old
+        ⏰ Expirar antigos (+24h)
     </button>
     <button class="btn btn-ghost"
             hx-post="/queue/shuffle" hx-target="#queue-table" hx-swap="innerHTML">

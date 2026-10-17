@@ -57,7 +57,7 @@ def test_video_detail_runs_outside_the_database(monkeypatch, tmp_path):
                 "INSERT INTO channels (name, channel_id, min_age_hours) VALUES ('C', 'UC1', 0)"
             )
             await db.commit()
-        added, skipped = await queue_svc._scan_channel("UC1", 0, "C")
+        added, skipped, _reasons = await queue_svc._scan_channel("UC1", 0, "C")
         assert added == 1
         assert skipped == 0
         async with get_db() as db:
@@ -113,7 +113,7 @@ def test_detail_publish_time_drops_a_video_the_list_called_new(monkeypatch, tmp_
                 (channel_id, now),
             )
             await db.commit()
-        added, skipped = await queue_svc._scan_channel("UC1", 0, "C")
+        added, skipped, _reasons = await queue_svc._scan_channel("UC1", 0, "C")
         assert added == 0
         assert skipped == 1
         async with get_db() as db:
@@ -159,7 +159,7 @@ def test_shorts_shelf_published_zero_uses_the_video_time(monkeypatch, tmp_path):
                 "VALUES ('Jeffrey Chiquini', 'UC1', 2, 1)"
             )
             await db.commit()
-        added, skipped = await queue_svc._scan_channel("UC1", 2, "Jeffrey Chiquini")
+        added, skipped, _reasons = await queue_svc._scan_channel("UC1", 2, "Jeffrey Chiquini")
         assert added == 1
         assert skipped == 0
         async with get_db() as db:
@@ -209,7 +209,7 @@ def test_shorts_shelf_still_drops_a_detail_older_than_a_day(monkeypatch, tmp_pat
                 "VALUES ('C', 'UC1', 0, 1)"
             )
             await db.commit()
-        added, skipped = await queue_svc._scan_channel("UC1", 0, "C")
+        added, skipped, _reasons = await queue_svc._scan_channel("UC1", 0, "C")
         assert added == 0
         assert skipped == 1
         async with get_db() as db:
@@ -293,7 +293,7 @@ def test_scan_keeps_a_16h_video_when_detail_unix_is_yesterday_midnight(monkeypat
                 "INSERT INTO channels (name, channel_id, min_age_hours) VALUES ('ANCAPSU', 'UC1', 0)"
             )
             await db.commit()
-        added, skipped = await queue_svc._scan_channel("UC1", 0, "ANCAPSU")
+        added, skipped, _reasons = await queue_svc._scan_channel("UC1", 0, "ANCAPSU")
         assert added == 1
         assert skipped == 0
         async with get_db() as db:
@@ -345,7 +345,7 @@ def test_google_published_at_is_not_replaced_by_one_day_ago(monkeypatch, tmp_pat
                 "INSERT INTO channels (name, channel_id, min_age_hours) VALUES ('ANCAPSU', 'UC1', 0)"
             )
             await db.commit()
-        added, skipped = await queue_svc._scan_channel("UC1", 0, "ANCAPSU")
+        added, skipped, _reasons = await queue_svc._scan_channel("UC1", 0, "ANCAPSU")
         assert added == 1
         assert skipped == 0
         async with get_db() as db:

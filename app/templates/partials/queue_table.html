@@ -3,30 +3,37 @@
     {% if scan_stats.error %}
     <span style="color:var(--danger-color)">{{ scan_stats.error }}</span>
     {% else %}
-    <span style="color:var(--success-color)">✓ Scan: {{ scan_stats.added }} added, {{ scan_stats.skipped }} skipped, {{ scan_stats.errors }} errors{% if scan_stats.cleared is defined %} · {{ scan_stats.cleared }} removidos da fila{% endif %}</span>
+    {% set ns = namespace(bits=[]) %}
+    {% if scan_stats.skipped_duration %}{% set ns.bits = ns.bits + [scan_stats.skipped_duration ~ ' com mais de ' ~ (max_duration_minutes|default(30)) ~ ' min'] %}{% endif %}
+    {% if scan_stats.skipped_shorts %}{% set ns.bits = ns.bits + [scan_stats.skipped_shorts ~ ' shorts desativados no canal'] %}{% endif %}
+    {% if scan_stats.skipped_age %}{% set ns.bits = ns.bits + [scan_stats.skipped_age ~ ' fora da janela de idade'] %}{% endif %}
+    {% if scan_stats.skipped_members %}{% set ns.bits = ns.bits + [scan_stats.skipped_members ~ ' exclusivos para membros'] %}{% endif %}
+    <span style="color:var(--success-color)">✓ Scan concluído: {{ scan_stats.added }} adicionado(s), {{ scan_stats.skipped }} ignorado(s), {{ scan_stats.errors }} erro(s){% if ns.bits %} ({{ ns.bits | join(', ') }}){% endif %}{% if scan_stats.cleared is defined %} · {{ scan_stats.cleared }} removidos da fila{% endif %}</span>
     {% endif %}
 </div>
 {% endif %}
 
 {% if expired_count is defined and expired_count %}
 <div class="card mb-2" style="border-color:var(--text-muted)">
-    <span class="text-muted">⏰ {{ expired_count }} video(s) expired</span>
+    <span class="text-muted">⏰ {{ expired_count }} vídeo(s) com mais de 24h removido(s) da fila</span>
 </div>
 {% endif %}
+
+<p class="mb-2"><strong>{{ items|length if items else 0 }} vídeo(s) na fila</strong></p>
 
 {% if items %}
 <table>
     <thead>
         <tr>
             <th>#</th>
-            <th>Title</th>
-            <th>Channel</th>
-            <th>Duration</th>
+            <th>Título</th>
+            <th>Canal</th>
+            <th>Duração</th>
             <th>Tipo</th>
-            <th>Published</th>
+            <th>Publicado</th>
             <th>Status</th>
-            <th>File</th>
-            <th>Actions</th>
+            <th>Arquivo</th>
+            <th>Ações</th>
         </tr>
     </thead>
     <tbody>
@@ -102,12 +109,12 @@
                     {% if item.status == 'playing' %}
                     <button class="btn btn-primary" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
                             hx-post="/queue/{{ item.id }}/status/played" hx-target="#queue-table" hx-swap="innerHTML">
-                        ✓ Done
+                        ✓ Concluído
                     </button>
                     {% endif %}
                     <button class="btn btn-danger" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
                             hx-delete="/queue/{{ item.id }}" hx-target="#queue-table" hx-swap="innerHTML"
-                            hx-confirm="Remove from queue?">
+                            hx-confirm="Remover da fila?">
                         ✕
                     </button>
                 </div>
@@ -117,5 +124,5 @@
     </tbody>
 </table>
 {% else %}
-<p class="text-muted">Queue is empty. Click "Scan Channels" to populate.</p>
+<p class="text-muted">A fila está vazia. Use "Escanear canais" para preenchê-la.</p>
 {% endif %}

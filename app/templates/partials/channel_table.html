@@ -9,7 +9,12 @@
     {% if scan_stats.error %}
     <span style="color:var(--danger-color)">{{ scan_stats.error }}</span>
     {% else %}
-    <span style="color:var(--success-color)">✓ Scan: {{ scan_stats.added }} added, {{ scan_stats.skipped }} skipped, {{ scan_stats.errors }} errors</span>
+    {% set ns = namespace(bits=[]) %}
+    {% if scan_stats.skipped_duration %}{% set ns.bits = ns.bits + [scan_stats.skipped_duration ~ ' com mais de ' ~ (max_duration_minutes|default(30)) ~ ' min'] %}{% endif %}
+    {% if scan_stats.skipped_shorts %}{% set ns.bits = ns.bits + [scan_stats.skipped_shorts ~ ' shorts desativados no canal'] %}{% endif %}
+    {% if scan_stats.skipped_age %}{% set ns.bits = ns.bits + [scan_stats.skipped_age ~ ' fora da janela de idade'] %}{% endif %}
+    {% if scan_stats.skipped_members %}{% set ns.bits = ns.bits + [scan_stats.skipped_members ~ ' exclusivos para membros'] %}{% endif %}
+    <span style="color:var(--success-color)">✓ Scan concluído: {{ scan_stats.added }} adicionado(s), {{ scan_stats.skipped }} ignorado(s), {{ scan_stats.errors }} erro(s){% if ns.bits %} ({{ ns.bits | join(', ') }}){% endif %}</span>
     {% endif %}
 </div>
 {% endif %}
