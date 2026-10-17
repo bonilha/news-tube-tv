@@ -72,12 +72,37 @@ async def _scan_all_channels() -> dict[str, int]:
     return {"added": added, "skipped": skipped, "errors": errors}
 
 
+async def _channel_allows_shorts(channel_id: str) -> bool:
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT enable_shorts FROM channels WHERE channel_id = ?",
+            (channel_id,),
+        )
+        row = await cursor.fetchone()
+    return bool(row and row["enable_shorts"])
+
+
 async def _scan_channel(
     channel_id: str, min_age_hours: float, channel_name: str = "",
 ) -> tuple[int, int]:
     """Scan one channel. Returns (added, skipped)."""
-    videos = await invidious.channel_videos(channel_id, sort_by="newest")
-    shorts_ids = await invidious.channel_shorts_ids(channel_id)
+    allow_shorts = await _channel_allows_shorts(channel_id)
+    videos = list(await invidious.channel_videos(channel_id, sort_by="newest"))
+    shorts = await invidious.channel_shorts(channel_id) if allow_shorts else []
+    shorts_ids = {
+        item.get("videoId") or item.get("videoID")
+        for item in shorts
+        if item.get("videoId") or item.get("videoID")
+    }
+    if not allow_shorts:
+        shorts_ids = await invidious.channel_shorts_ids(channel_id)
+    else:
+        seen = {item.get("videoId") or item.get("videoID") for item in videos}
+        for item in shorts:
+            video_id = item.get("videoId") or item.get("videoID")
+            if video_id and video_id not in seen:
+                videos.append(item)
+                seen.add(video_id)
 
     added = 0
     skipped = 0
@@ -93,8 +118,10 @@ async def _scan_channel(
 
     for raw in videos:
         meta = invidious.normalize_video(raw)
+        is_short = int(invidious.classify_video(meta, shorts_ids) == "short")
         eligible, _reason = invidious.is_eligible(
             meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
+            allow_shorts=allow_shorts,
         )
         if not eligible:
             skipped += 1
@@ -118,8 +145,8 @@ async def _scan_channel(
             async with get_db() as db:
                 cursor = await db.execute(
                     """INSERT OR IGNORE INTO queue
-                       (channel_id, video_id, title, author, duration, published_unix, thumb, play_order, max_height)
-                       SELECT id, ?, ?, ?, ?, ?, ?, ?, ?
+                       (channel_id, video_id, title, author, duration, published_unix, thumb, play_order, max_height, is_short)
+                       SELECT id, ?, ?, ?, ?, ?, ?, ?, ?, ?
                        FROM channels WHERE channel_id = ?
                        LIMIT 1""",
                     (
@@ -131,6 +158,7 @@ async def _scan_channel(
                         meta["thumb"],
                         play_order,
                         int(meta.get("max_height") or 0),
+                        is_short,
                         channel_id,
                     ),
                 )
@@ -138,8 +166,14 @@ async def _scan_channel(
                     next_order = play_order
                 inserted = bool(cursor.rowcount)
                 await db.execute(
-                    "UPDATE queue SET title = ?, thumb = ?, max_height = ? WHERE video_id = ?",
-                    (meta["title"], meta["thumb"], int(meta.get("max_height") or 0), meta["video_id"]),
+                    "UPDATE queue SET title = ?, thumb = ?, max_height = ?, is_short = ? WHERE video_id = ?",
+                    (
+                        meta["title"],
+                        meta["thumb"],
+                        int(meta.get("max_height") or 0),
+                        is_short,
+                        meta["video_id"],
+                    ),
                 )
                 await db.commit()
             if inserted:
@@ -269,14 +303,37 @@ async def rotate_video_to_end(video_id: str) -> None:
     async with queue_download.play_order_lock:
         queue_download.note_play_order_changing()
         async with get_db() as db:
-            cursor = await db.execute("SELECT COALESCE(MAX(play_order), 0) FROM queue")
-            row = await cursor.fetchone()
-            max_order = row[0] if row else 0
+            cursor = await db.execute(
+                "SELECT id, video_id, channel_id, is_short, play_order FROM queue "
+                "ORDER BY play_order ASC, id ASC"
+            )
+            rows = [dict(row) for row in await cursor.fetchall()]
+            target = next((row for row in rows if row["video_id"] == video_id), None)
+            if target is None:
+                return
+            max_order = max(int(row["play_order"] or 0) for row in rows)
+            others = [row for row in rows if row["id"] != target["id"]]
+            ids = [int(row["id"]) for row in others] + [int(target["id"])]
+            channel_of = {int(row["id"]): int(row["channel_id"]) for row in rows}
+            shorts = {int(row["id"]) for row in rows if int(row["is_short"] or 0)}
+            settled = settle_tail_short(ids, shorts, channel_of)
             await db.execute(
-                "UPDATE queue SET play_order = ?, status = 'pending', play_count = play_count + 1 "
+                "UPDATE queue SET status = 'pending', play_count = play_count + 1, play_order = ? "
                 "WHERE video_id = ?",
                 (max_order + 1, video_id),
             )
+            assigned = {int(row["id"]): int(row["play_order"] or 0) for row in others}
+            assigned[int(target["id"])] = max_order + 1
+            moves = [
+                (assigned[previous], queue_id)
+                for queue_id, previous in zip(settled, ids)
+                if queue_id != previous
+            ]
+            if moves:
+                await db.executemany(
+                    "UPDATE queue SET play_order = ? WHERE id = ?",
+                    moves,
+                )
             await db.commit()
     queue_download.schedule_sync()
 
@@ -478,16 +535,21 @@ async def startup_broadcast_queue() -> dict[str, int]:
 _LOW_RES_HEIGHT = 720
 
 
-def shuffle_ids(rows: list[tuple[int, int, int, int]], head: int) -> list[int]:
+def shuffle_ids(rows: list[tuple], head: int) -> list[int]:
     """Queue ids with the same channel apart, and low resolution after `head`.
 
-    Each row is (queue id, channel id, max height, play count). A known height
-    of 720 or less follows every taller or unknown video, so the first `head`
-    positions stay clear of it when enough taller videos exist. Inside each of
-    those groups, never-aired videos come first, then one play, then two, and
-    so on. Each play-count band is spread on its own.
+    Each row is (queue id, channel id, max height, play count) and an optional
+    is_short flag. A known height of 720 or less follows every taller or
+    unknown video, so the first `head` positions stay clear of it when enough
+    taller videos exist. Inside each of those groups, never-aired videos come
+    first, then one play, then two, and so on. Each play-count band is spread
+    on its own. Shorts in a band are then swapped forward so two do not sit
+    together when a normal video can take the gap without joining a channel.
     """
     del head  # the split is the whole taller group, which covers the first N
+
+    channel_of = {int(row[0]): int(row[1]) for row in rows}
+    shorts = {int(row[0]) for row in rows if len(row) > 4 and int(row[4])}
 
     def band(selected: list[tuple[int, int, int]]) -> list[int]:
         counts = sorted({play_count for _queue_id, _channel_id, play_count in selected})
@@ -499,19 +561,123 @@ def shuffle_ids(rows: list[tuple[int, int, int, int]], head: int) -> list[int]:
                 if count == play_count
             ]
             ordered.extend(spread_play_order(group))
-        return ordered
+        return pull_shorts_apart(ordered, shorts, channel_of)
 
     low = [
         (queue_id, channel_id, int(play_count))
-        for queue_id, channel_id, height, play_count in rows
+        for queue_id, channel_id, height, play_count, *_rest in (
+            (*row, 0) if len(row) == 4 else row for row in rows
+        )
         if 0 < int(height) <= _LOW_RES_HEIGHT
     ]
     taller = [
         (queue_id, channel_id, int(play_count))
-        for queue_id, channel_id, height, play_count in rows
+        for queue_id, channel_id, height, play_count, *_rest in (
+            (*row, 0) if len(row) == 4 else row for row in rows
+        )
         if not (0 < int(height) <= _LOW_RES_HEIGHT)
     ]
-    return band(taller) + band(low)
+    high = band(taller)
+    flat = band(low)
+    high, flat = split_short_boundary(high, flat, shorts, channel_of)
+    return high + flat
+
+
+def settle_tail_short(
+    ordered: list[int], shorts: set[int], channel_of: dict[int, int],
+) -> list[int]:
+    """If the video just sent to the end sits on another short, swap it back."""
+    if len(ordered) < 3 or ordered[-1] not in shorts or ordered[-2] not in shorts:
+        return ordered
+    # The short already at the end stays there. The short in front of it swaps
+    # with the nearest normal behind, so the tail is no longer touching a short.
+    return _swap_backward(ordered, len(ordered) - 2, shorts, channel_of)
+
+
+def pull_shorts_apart(
+    ordered: list[int], shorts: set[int], channel_of: dict[int, int],
+) -> list[int]:
+    """Move a following normal video into a pair of shorts when the swap is legal."""
+    result = list(ordered)
+    index = 1
+    while index < len(result):
+        if result[index] not in shorts or result[index - 1] not in shorts:
+            index += 1
+            continue
+        swapped = False
+        for later in range(index + 1, len(result)):
+            if result[later] in shorts:
+                continue
+            if _swap_keeps_channels(result, index, later, channel_of):
+                result[index], result[later] = result[later], result[index]
+                swapped = True
+                break
+        if not swapped:
+            index += 1
+    return result
+
+
+def split_short_boundary(
+    high: list[int], flat: list[int], shorts: set[int], channel_of: dict[int, int],
+) -> tuple[list[int], list[int]]:
+    """Keep a 720p video out of the tall group while opening the group boundary."""
+    if not high or not flat or high[-1] not in shorts or flat[0] not in shorts:
+        return high, flat
+    opened = _swap_forward(flat, 0, shorts, channel_of, left_channel=channel_of[high[-1]])
+    if opened[0] not in shorts:
+        return high, opened
+    opened_high = _swap_backward(high, len(high) - 1, shorts, channel_of, right_channel=channel_of[flat[0]])
+    return opened_high, flat
+
+
+def _swap_forward(
+    seq: list[int], index: int, shorts: set[int], channel_of: dict[int, int],
+    left_channel: int | None = None,
+) -> list[int]:
+    for later in range(index + 1, len(seq)):
+        if seq[later] in shorts:
+            continue
+        if _swap_keeps_channels(seq, index, later, channel_of, left_channel=left_channel):
+            trial = list(seq)
+            trial[index], trial[later] = trial[later], trial[index]
+            return trial
+    return list(seq)
+
+
+def _swap_backward(
+    seq: list[int], index: int, shorts: set[int], channel_of: dict[int, int],
+    right_channel: int | None = None,
+) -> list[int]:
+    for earlier in range(index - 1, -1, -1):
+        if seq[earlier] in shorts:
+            continue
+        if _swap_keeps_channels(seq, earlier, index, channel_of, right_channel=right_channel):
+            trial = list(seq)
+            trial[earlier], trial[index] = trial[index], trial[earlier]
+            return trial
+    return list(seq)
+
+
+def _swap_keeps_channels(
+    seq: list[int], left: int, right: int, channel_of: dict[int, int],
+    left_channel: int | None = None, right_channel: int | None = None,
+) -> bool:
+    trial = list(seq)
+    trial[left], trial[right] = trial[right], trial[left]
+    if left_channel is not None and channel_of[trial[0]] == left_channel:
+        return False
+    if right_channel is not None and channel_of[trial[-1]] == right_channel:
+        return False
+    return _slot_keeps_channel(trial, left, channel_of) and _slot_keeps_channel(trial, right, channel_of)
+
+
+def _slot_keeps_channel(seq: list[int], index: int, channel_of: dict[int, int]) -> bool:
+    channel = channel_of[seq[index]]
+    if index > 0 and channel_of[seq[index - 1]] == channel:
+        return False
+    if index + 1 < len(seq) and channel_of[seq[index + 1]] == channel:
+        return False
+    return True
 
 
 def spread_play_order(rows: list[tuple[int, int]]) -> list[int]:
@@ -592,7 +758,7 @@ async def shuffle_play_order(*, reset_files: bool = False) -> int:
         queue_download.note_play_order_changing()
         async with get_db() as db:
             cursor = await db.execute(
-                "SELECT id, channel_id, max_height, play_count FROM queue"
+                "SELECT id, channel_id, max_height, play_count, is_short FROM queue"
             )
             rows = [
                 (
@@ -600,6 +766,7 @@ async def shuffle_play_order(*, reset_files: bool = False) -> int:
                     row["channel_id"],
                     int(row["max_height"] or 0),
                     int(row["play_count"] or 0),
+                    int(row["is_short"] or 0),
                 )
                 for row in await cursor.fetchall()
             ]

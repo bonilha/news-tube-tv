@@ -718,6 +718,30 @@ def _scale_filter() -> str:
     )
 
 
+def is_portrait(width: int, height: int) -> bool:
+    return width > 0 and height > width
+
+
+def portrait_fill_filter() -> str:
+    """Blurred 16:9 background with the portrait picture centered at canvas height.
+
+    The small blur pass is one tenth of the canvas, matching the 192x108 sample
+    on a 1920x1080 frame. The encoder is chosen by the hardware probe.
+    """
+    width = settings.OBS_BASE_WIDTH
+    height = settings.OBS_BASE_HEIGHT
+    blur_w = max(2, (width // 10) - (width // 10) % 2)
+    blur_h = max(2, (height // 10) - (height // 10) % 2)
+    return (
+        "[0:v]split=2[bg][fg];"
+        f"[bg]scale={blur_w}:{blur_h}:force_original_aspect_ratio=increase:flags=bilinear,"
+        f"crop={blur_w}:{blur_h},gblur=sigma=8,eq=brightness=-0.2,"
+        f"scale={width}:{height}:flags=bilinear,format=yuv420p[blurred];"
+        f"[fg]scale=-2:{height}:flags=lanczos,format=yuv420p[fgv];"
+        "[blurred][fgv]overlay=(W-w)/2:(H-h)/2,setsar=1[v]"
+    )
+
+
 def _enough_free_space() -> bool:
     try:
         free = shutil.disk_usage(settings.VIDEOS_DIR).free
@@ -887,6 +911,7 @@ def placement_action(
     encoder: str,
     encoder_args: tuple[str, ...],
     scale_filter: str,
+    portrait: bool = False,
 ) -> str | list[str]:
     """'move' when the file can be renamed. Otherwise the ffmpeg output args.
 
@@ -896,6 +921,19 @@ def placement_action(
     audio_out = None
     if normalize and measured:
         audio_out = ["-af", _loudnorm_apply(measured), "-c:a", "aac", "-b:a", "160k"]
+    if portrait:
+        if not encoder:
+            raise RuntimeError("no H.264 encoder to fill a portrait frame")
+        if audio_out is None:
+            audio = ["-c:a", "copy"] if audio_codec == "aac" else ["-c:a", "aac", "-b:a", "160k"]
+        else:
+            audio = audio_out
+        return [
+            "-filter_threads", "4",
+            "-filter_complex", scale_filter,
+            "-map", "[v]", "-map", "0:a",
+            "-c:v", encoder, *encoder_args, *audio,
+        ]
     if (
         not needs_scale
         and video_codec == "h264"
@@ -976,6 +1014,7 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
     video_codec, audio_codec = _codecs(source)
     width, height = _video_size(source)
     target = (settings.OBS_BASE_WIDTH, settings.OBS_BASE_HEIGHT)
+    portrait = is_portrait(width, height)
     needs_scale = needs_video_scale(video_codec, width, height, target)
     if normalize:
         say(f"Medindo volume: {shown}")
@@ -991,7 +1030,8 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
         measured=measured,
         encoder=_encoder or "",
         encoder_args=_encoder_args,
-        scale_filter=_scale_filter(),
+        scale_filter=portrait_fill_filter() if portrait else _scale_filter(),
+        portrait=portrait,
     )
     if action == "move":
         say(f"Vídeo já está em H.264, movendo para a fila: {shown}")
@@ -1001,7 +1041,9 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
         _drop_sponsor_original(original, source, final)
         say(f"Na fila: {shown}")
         return
-    if needs_scale:
+    if portrait:
+        say(f"Preenchendo vertical em {target[0]}x{target[1]}: {shown}")
+    elif needs_scale:
         say(f"Escalando para {target[0]}x{target[1]}: {shown}")
     elif video_codec == "h264" and "-c:v" in action and action[action.index("-c:v") + 1] == "copy":
         say(f"Copiando vídeo e normalizando áudio: {shown}")

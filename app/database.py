@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS channels (
     handle TEXT NOT NULL DEFAULT '',
     min_age_hours REAL NOT NULL DEFAULT 2.0,
     active INTEGER NOT NULL DEFAULT 1,
+    enable_shorts INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -116,8 +117,18 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0"
             )
+        if "is_short" not in columns:
+            await db.execute(
+                "ALTER TABLE queue ADD COLUMN is_short INTEGER NOT NULL DEFAULT 0"
+            )
         cursor = await db.execute("PRAGMA table_info(broadcast_control)")
         control_columns = {row[1] for row in await cursor.fetchall()}
+        cursor = await db.execute("PRAGMA table_info(channels)")
+        channel_columns = {row[1] for row in await cursor.fetchall()}
+        if "enable_shorts" not in channel_columns:
+            await db.execute(
+                "ALTER TABLE channels ADD COLUMN enable_shorts INTEGER NOT NULL DEFAULT 0"
+            )
         if "audio_normalize" not in control_columns:
             await db.execute(
                 "ALTER TABLE broadcast_control ADD COLUMN audio_normalize INTEGER NOT NULL DEFAULT 1"

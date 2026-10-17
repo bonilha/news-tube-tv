@@ -97,6 +97,34 @@ async def toggle_channel(
     return _html(request, "partials/channel_table.html", {"channels": channels})
 
 
+@router.post("/channels/{channel_db_id}/shorts", response_class=HTMLResponse)
+async def toggle_shorts(
+    request: Request,
+    channel_db_id: int,
+    _auth: bool = Depends(verify_credentials),
+):
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE channels SET enable_shorts = 1 - enable_shorts WHERE id = ?",
+            (channel_db_id,),
+        )
+        await db.commit()
+        cursor = await db.execute(
+            "SELECT channel_id, name, min_age_hours, active FROM channels WHERE id = ?",
+            (channel_db_id,),
+        )
+        row = await cursor.fetchone()
+    stats = None
+    if row and row["active"]:
+        stats = await queue_svc.maintain_channel(
+            row["channel_id"], row["min_age_hours"], row["name"],
+        )
+    return _html(request, "partials/channel_table.html", {
+        "channels": await _list_channels(),
+        "scan_stats": stats,
+    })
+
+
 @router.post("/channels/{channel_db_id}/update", response_class=HTMLResponse)
 async def update_channel(
     request: Request,
@@ -145,7 +173,7 @@ async def api_list_channels(_auth: bool = Depends(verify_credentials)):
 async def _list_channels() -> list[dict]:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT id, name, channel_id, handle, min_age_hours, active, created_at "
+            "SELECT id, name, channel_id, handle, min_age_hours, active, enable_shorts, created_at "
             "FROM channels ORDER BY created_at DESC"
         )
         return [dict(row) for row in await cursor.fetchall()]

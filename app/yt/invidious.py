@@ -201,13 +201,21 @@ async def channel_videos(ucid: str, sort_by: str = "newest") -> list[dict[str, A
     return []
 
 
-async def channel_shorts_ids(ucid: str) -> set[str]:
+async def channel_shorts(ucid: str, sort_by: str = "newest") -> list[dict[str, Any]]:
     from urllib.parse import quote
     try:
-        data = await _get(f"/channels/{quote(ucid, safe='')}/shorts", {"sort_by": "newest"})
+        data = await _get(f"/channels/{quote(ucid, safe='')}/shorts", {"sort_by": sort_by})
     except InvidiousError:
-        return set()
-    videos = data.get("videos", []) if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        return []
+    if isinstance(data, dict):
+        return list(data.get("videos") or data.get("latestVideos") or [])
+    if isinstance(data, list):
+        return data
+    return []
+
+
+async def channel_shorts_ids(ucid: str) -> set[str]:
+    videos = await channel_shorts(ucid)
     return {v.get("videoId") or v.get("videoID") for v in videos if v.get("videoId") or v.get("videoID")}
 
 
@@ -244,12 +252,16 @@ def is_eligible(
     shorts_ids: set[str] | None = None,
     now_unix: int | None = None,
     max_duration_minutes: int | float | None = None,
+    allow_shorts: bool = False,
 ) -> tuple[bool, str]:
     """Check if a video is eligible for the queue. Returns (eligible, reason)."""
     import time as _time
 
     classification = classify_video(meta, shorts_ids)
-    if classification != "video":
+    if classification == "short":
+        if not allow_shorts:
+            return False, "Excluído: short"
+    elif classification != "video":
         return False, f"Excluído: {classification}"
 
     length = int(meta.get("duracao") or meta.get("lengthSeconds") or 0)
