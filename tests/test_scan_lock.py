@@ -39,9 +39,11 @@ def test_video_detail_runs_outside_the_database(monkeypatch, tmp_path):
     async def no_shorts(_channel_id):
         return set()
 
+    detail_published = int(time.time()) - 7200
+
     async def detail(_video_id, _fallback):
         assert open_depth == 0
-        return "Título em português", 1080, False
+        return "Título em português", 1080, False, detail_published
 
     monkeypatch.setattr(queue_svc, "get_db", tracking)
     monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
@@ -60,10 +62,65 @@ def test_video_detail_runs_outside_the_database(monkeypatch, tmp_path):
         assert skipped == 0
         async with get_db() as db:
             cursor = await db.execute(
-                "SELECT title, max_height FROM queue WHERE video_id = 'abcdefghijk'"
+                "SELECT title, max_height, published_unix FROM queue WHERE video_id = 'abcdefghijk'"
             )
             row = await cursor.fetchone()
         assert row["title"] == "Título em português"
         assert row["max_height"] == 1080
+        assert row["published_unix"] == detail_published
+
+    asyncio.run(run())
+
+
+def test_detail_publish_time_drops_a_video_the_list_called_new(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "DB_PATH", tmp_path / "scan.db")
+    now = int(time.time())
+
+    async def videos(_channel_id, sort_by="newest"):
+        return [{
+            "videoId": "vZvLAxxNbk1",
+            "title": "English list title",
+            "author": "Canal",
+            "lengthSeconds": 600,
+            "published": now,
+            "type": "video",
+            "videoThumbnails": [],
+        }]
+
+    async def no_shorts(_channel_id):
+        return set()
+
+    async def detail(_video_id, _fallback):
+        return "LULA E VELHA MÍDIA", 1080, False, now - (120 * 86400)
+
+    monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
+    monkeypatch.setattr(queue_svc.invidious, "channel_shorts_ids", no_shorts)
+    monkeypatch.setattr(queue_svc.invidious, "video_title", detail)
+
+    async def run():
+        await init_db()
+        async with get_db() as db:
+            await db.execute(
+                "INSERT INTO channels (name, channel_id, min_age_hours) VALUES ('C', 'UC1', 0)"
+            )
+            await db.commit()
+            cursor = await db.execute("SELECT id FROM channels WHERE channel_id = 'UC1'")
+            channel_id = (await cursor.fetchone())["id"]
+            await db.execute(
+                """INSERT INTO queue
+                   (channel_id, video_id, title, author, duration, published_unix, status)
+                   VALUES (?, 'vZvLAxxNbk1', 'stale', 'Canal', 600, ?, 'pending')""",
+                (channel_id, now),
+            )
+            await db.commit()
+        added, skipped = await queue_svc._scan_channel("UC1", 0, "C")
+        assert added == 0
+        assert skipped == 1
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT video_id FROM queue WHERE video_id = 'vZvLAxxNbk1'"
+            )
+            row = await cursor.fetchone()
+        assert row is None
 
     asyncio.run(run())
