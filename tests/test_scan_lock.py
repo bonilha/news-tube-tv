@@ -220,3 +220,87 @@ def test_shorts_shelf_still_drops_a_detail_older_than_a_day(monkeypatch, tmp_pat
         assert row is None
 
     asyncio.run(run())
+
+
+def test_relative_text_beats_utc_midnight():
+    from app.yt.invidious import resolve_published
+
+    now = 1_792_250_000
+    midnight = now - (now % 86400) - 86400
+    resolved = resolve_published(midnight, "16 horas atrás", now)
+    assert resolved == now - 16 * 3600
+    assert resolve_published(midnight, "23 hours ago", now) == now - 23 * 3600
+    assert resolve_published(midnight, "1 dia atrás", now) == now - 86400
+    assert resolve_published(midnight, "1 day ago", now) == now - 86400
+    assert resolve_published(midnight, None, now) is None
+    precise = now - 3 * 3600
+    assert resolve_published(precise, "16 de out. de 2026", now) == precise
+
+
+def test_scan_keeps_a_16h_video_when_detail_unix_is_yesterday_midnight(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "DB_PATH", tmp_path / "scan.db")
+    now = int(time.time())
+    midnight = now - (now % 86400) - 86400
+
+    async def videos(_channel_id, sort_by="newest"):
+        return [{
+            "videoId": "abcdefghijk",
+            "title": "English list title",
+            "author": "ANCAPSU",
+            "lengthSeconds": 600,
+            "published": now - 16 * 3600,
+            "type": "video",
+            "videoThumbnails": [],
+        }]
+
+    async def no_shorts(_channel_id):
+        return set()
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {
+                "title": "Título em português",
+                "published": midnight,
+                "publishedText": "16 horas atrás",
+                "lengthSeconds": 600,
+                "adaptiveFormats": [{"size": "1920x1080"}],
+            }
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, params=None):
+            return _Resp()
+
+    monkeypatch.setattr(queue_svc.invidious.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
+    monkeypatch.setattr(queue_svc.invidious, "channel_shorts_ids", no_shorts)
+
+    async def run():
+        await init_db()
+        async with get_db() as db:
+            await db.execute(
+                "INSERT INTO channels (name, channel_id, min_age_hours) VALUES ('ANCAPSU', 'UC1', 0)"
+            )
+            await db.commit()
+        added, skipped = await queue_svc._scan_channel("UC1", 0, "ANCAPSU")
+        assert added == 1
+        assert skipped == 0
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT published_unix FROM queue WHERE video_id = 'abcdefghijk'"
+            )
+            row = await cursor.fetchone()
+        assert row["published_unix"] != midnight
+        assert now - int(row["published_unix"]) < 24 * 3600
+
+    asyncio.run(run())

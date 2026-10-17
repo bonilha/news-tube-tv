@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -152,6 +153,75 @@ def stream_max_height(data: dict[str, Any]) -> int:
     return max(qualities) if qualities else 0
 
 
+_RELATIVE_AGE = re.compile(
+    r"(?:há\s+)?(\d+)\s+"
+    r"(segundos?|minutos?|horas?|dias?|semanas?|m[eê]ses|m[eê]s|anos?"
+    r"|seconds?|minutes?|hours?|days?|weeks?|months?|years?)"
+    r"(?:\s+atr[aá]s|\s+ago)?",
+    re.IGNORECASE,
+)
+_AGE_SECONDS = {
+    "segundo": 1,
+    "minute": 60,
+    "minuto": 60,
+    "hora": 3600,
+    "hour": 3600,
+    "dia": 86400,
+    "day": 86400,
+    "semana": 7 * 86400,
+    "week": 7 * 86400,
+    "mes": 30 * 86400,
+    "mês": 30 * 86400,
+    "month": 30 * 86400,
+    "ano": 365 * 86400,
+    "year": 365 * 86400,
+}
+
+
+def _unit_seconds(unit: str) -> int:
+    key = unit.lower()
+    if key.startswith("mês") or key.startswith("mes"):
+        return 30 * 86400
+    for name, seconds in _AGE_SECONDS.items():
+        if key.startswith(name):
+            return seconds
+    return 0
+
+
+def relative_age_seconds(text: str | None) -> int | None:
+    """Seconds ago from a relative publishedText, or None when it is not relative."""
+    if not text:
+        return None
+    match = _RELATIVE_AGE.search(text.strip())
+    if not match:
+        return None
+    seconds = _unit_seconds(match.group(2))
+    if seconds <= 0:
+        return None
+    return int(match.group(1)) * seconds
+
+
+def resolve_published(
+    published_unix: int | None,
+    published_text: str | None,
+    now_unix: int,
+) -> int | None:
+    """Unix time for the 24h window.
+
+    Invidious often stores only UTC midnight in `published` while `publishedText`
+    still says "16 horas atrás". A midnight stamp must not replace that age.
+    A real timestamp (not divisible by 86400) is kept when the text is not relative.
+    """
+    age = relative_age_seconds(published_text)
+    if age is not None:
+        return now_unix - age
+    if published_unix is None:
+        return None
+    if published_unix % 86400 == 0:
+        return None
+    return published_unix
+
+
 def members_only(payload: dict[str, Any] | None) -> bool:
     """True when the video-detail payload says the video is for channel members.
 
@@ -167,11 +237,13 @@ def members_only(payload: dict[str, Any] | None) -> bool:
 async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | None, int | None, int]:
     """Title, height, members-only, published unix, and length from the video endpoint.
 
-    The channel list ignores hl and sometimes stamps published as "now"
-    with 0 views. The real publish time is on GET /videos/:id.
+    The channel list ignores hl and sometimes stamps published as "now".
+    GET /videos/:id often puts only UTC midnight in `published` and the real
+    age in `publishedText` ("16 horas atrás"). That midnight is not returned.
     Members-only answers HTTP 500 with only `error`, which `_get` would throw away.
     Members is None when the request fails for another reason.
-    Published is None when the payload has no usable unix time.
+    Published is None when the payload has no usable time, so the scan keeps
+    the channel-list timestamp.
     """
     if not video_id:
         return fallback, 0, None, None, 0
@@ -198,7 +270,10 @@ async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | No
         length = int(data.get("lengthSeconds") or 0)
     except (TypeError, ValueError):
         length = 0
-    return title, stream_max_height(data), False, published_unix, length
+    import time as _time
+
+    resolved = resolve_published(published_unix, data.get("publishedText"), int(_time.time()))
+    return title, stream_max_height(data), False, resolved, length
 
 
 async def channel_videos(ucid: str, sort_by: str = "newest") -> list[dict[str, Any]]:
