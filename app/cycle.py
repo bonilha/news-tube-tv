@@ -13,7 +13,7 @@ from app.obs.manager import SCENE_BUMPER, SCENE_PROGRAM, obs_manager
 from app.overlay import service as overlay
 from app.queue import cookies as yt_cookies
 from app.queue import download as queue_download
-from app.queue.download import ready_wait_seconds
+from app.queue.download import published_too_old, ready_wait_seconds
 from app.queue import service as queue_svc
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,19 @@ class _State(Enum):
     STOPPED = "stopped"
     BUMPER = "bumper"
     VIDEO = "video"
+
+
+def ids_to_protect(rows: list[dict], on_air: str) -> set[str]:
+    """Ids purge must not delete. The file OBS has open stays even after 24h."""
+    ids = {
+        row["video_id"]
+        for row in rows
+        if row.get("video_id")
+        and not published_too_old(int(row.get("published_unix") or 0))
+    }
+    if on_air:
+        ids.add(on_air)
+    return ids
 
 
 def _playable(row: dict) -> bool:
@@ -125,6 +138,7 @@ class CycleManager:
             cls._instance._wait_budget = 0.0
             cls._instance._unready_since = {}
             cls._instance._listening = False
+            cls._instance._finish_requested = False
         return cls._instance
 
     @property
@@ -207,11 +221,12 @@ class CycleManager:
         return ""
 
     def _protect(self) -> None:
-        """Video ids still needed in this pass, including the one on air."""
-        ids = {row["video_id"] for row in self._pass_items if row.get("video_id")}
-        if self._current_id:
-            ids.add(self._current_id)
-        queue_download.protect_video_ids(ids)
+        """Keep the file on air, and pass rows that are still inside 24h.
+
+        A row that has aged past 24h must leave this set. The next purge then
+        deletes it. Protecting the whole pass kept those files for days.
+        """
+        queue_download.protect_video_ids(ids_to_protect(self._pass_items, self._current_id))
 
     def _publish_keep_skip(self) -> None:
         """Aired videos fill the window only after the unplayed ones run out."""

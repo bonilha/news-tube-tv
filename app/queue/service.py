@@ -417,6 +417,19 @@ async def maintain_channel(
     return stats
 
 
+async def oldest_pending_age_hours() -> float | None:
+    """Age of the oldest pending row. None when the queue has no pending video."""
+    async with get_db() as db:
+        cursor = await db.execute(
+            "SELECT MIN(published_unix) FROM queue WHERE status = 'pending'"
+        )
+        row = await cursor.fetchone()
+    published = row[0] if row else None
+    if published is None:
+        return None
+    return (time.time() - int(published)) / 3600.0
+
+
 async def expire_old_videos() -> int:
     """Remove pending videos older than 24h, and any row already marked expired."""
     return await queue_download.purge_expired()

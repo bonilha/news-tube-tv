@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import time
+from datetime import datetime
 from pathlib import Path
 
 from app.broadcast import audio_normalize_enabled
@@ -20,9 +21,14 @@ from app.queue import sponsorblock
 log = logging.getLogger(__name__)
 
 
-def say(message: str) -> None:
-    """Operator line. Stays visible when the process log level is warning."""
-    print(f"NewsTube {message}", flush=True)
+def say(message: str, now: datetime | None = None) -> None:
+    """Operator line. Stays visible when the process log level is warning.
+
+    The clock is local, same as the schedule. A stall then has a last time.
+    """
+    moment = now or datetime.now()
+    stamp = moment.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"NewsTube {stamp} {message}", flush=True)
 
 
 def _label(row: dict | None, video_id: str) -> str:
@@ -378,6 +384,11 @@ def release_downloads() -> None:
         schedule_sync()
 
 
+def download_busy() -> bool:
+    """True while a sync is in flight. A stuck encode holds this until it times out."""
+    return _lock.locked() or (_task is not None and not _task.done())
+
+
 def schedule_sync() -> None:
     """Run a download sync soon. Overlapping calls share one follow-up pass.
 
@@ -420,7 +431,7 @@ async def purge_expired(keep_ids_now: set[str] | None = None) -> int:
     protected.update(keep_ids_now or ())
     async with get_db() as db:
         cursor = await db.execute(
-            """SELECT video_id, local_path FROM queue
+            """SELECT video_id, title, local_path, published_unix, status, duration FROM queue
                WHERE status = 'expired'
                   OR (status = 'pending' AND published_unix < ?)
                   OR (status != 'playing' AND duration > ?)""",
@@ -451,6 +462,12 @@ async def purge_expired(keep_ids_now: set[str] | None = None) -> int:
     await remove_files(doomed)
     if rows:
         log.info("Removed %d expired queue videos and their files", len(rows))
+    now_unix = int(time.time())
+    for row in rows:
+        if row["status"] == "pending" and int(row["published_unix"] or 0) < cutoff:
+            age_h = (now_unix - int(row["published_unix"] or 0)) / 3600.0
+            title = " ".join(str(row.get("title") or "").split()) or row["video_id"]
+            say(f"Fora das 24h ({age_h:.1f}h): {title}")
     return len(rows)
 
 
@@ -813,6 +830,10 @@ def raw_download(video_id: str) -> Path | None:
     return None
 
 
+# A stuck loudnorm or scale must not hold the download lock for the rest of the day.
+_FFMPEG_TIMEOUT_SEC = 30 * 60
+
+
 def _run_ffmpeg(source: Path, dest: Path, args: list[str]) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -820,7 +841,7 @@ def _run_ffmpeg(source: Path, dest: Path, args: list[str]) -> None:
         "-i", str(source), *args, str(dest),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT_SEC)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"ffmpeg failed: {exc}") from exc
     if result.returncode != 0 or not dest.exists() or dest.stat().st_size <= 0:
@@ -910,8 +931,8 @@ def _measure_loudness(source: Path) -> dict | None:
         "-i", str(source), *loudnorm_measure_args(),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True)
-    except OSError as exc:
+        result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT_SEC)
+    except (OSError, subprocess.TimeoutExpired) as exc:
         log.warning("Loudness measure failed for %s: %s", source.name, exc)
         return None
     text = (result.stderr or b"").decode("utf-8", "replace")
