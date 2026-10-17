@@ -124,6 +124,24 @@ def published_cutoff(now: int | None = None) -> int:
     return int(now if now is not None else time.time()) - PUBLISHED_MAX_AGE
 
 
+def approximate_published(row: dict) -> bool:
+    """True when the row's publish time is a whole day, not a moment.
+
+    Invidious answers 00:00:00 for channels it cannot date, which makes a video
+    posted hours ago look a day old. Those rows get one extra day before they
+    are treated as stale.
+    """
+    confidence = row.get("published_confidence")
+    if confidence:
+        return confidence == "approx"
+    return bool(row.get("published_unix")) and int(row["published_unix"]) % 86400 == 0
+
+
+def stale_cutoff(row: dict, now: int | None = None) -> int:
+    cutoff = published_cutoff(now)
+    return cutoff - PUBLISHED_MAX_AGE if approximate_published(row) else cutoff
+
+
 def published_too_old(published_unix: int, now: int | None = None) -> bool:
     return int(published_unix or 0) < published_cutoff(now)
 
@@ -438,7 +456,8 @@ async def purge_expired(keep_ids_now: set[str] | None = None) -> int:
     protected.update(keep_ids_now or ())
     async with get_db() as db:
         cursor = await db.execute(
-            """SELECT video_id, title, local_path, published_unix, status, duration FROM queue
+            """SELECT video_id, title, local_path, published_unix, status, duration, published_confidence
+               FROM queue
                WHERE status = 'expired'
                   OR (status = 'pending' AND published_unix < ?)
                   OR (status != 'playing' AND duration > ?)""",
@@ -448,17 +467,27 @@ async def purge_expired(keep_ids_now: set[str] | None = None) -> int:
             dict(row) for row in await cursor.fetchall()
             if row["video_id"] not in protected
         ]
+        # A date-only stamp names the start of the day, so it can look a full day
+        # older than the video is. Hold those to the same wider clock as the window.
+        rows = [
+            row for row in rows
+            if int(row["published_unix"] or 0) < stale_cutoff(row)
+        ]
         if rows:
-            placeholders = ",".join("?" * len(rows))
+            # One condition per row so an approximate stamp is compared with its
+            # own cut-off, the same one the SELECT above used.
+            conditions = []
+            params: list = []
+            for row in rows:
+                conditions.append(
+                    "(video_id = ? AND (status = 'expired'"
+                    " OR (status = 'pending' AND published_unix < ?)"
+                    " OR (status != 'playing' AND duration > ?)))"
+                )
+                params.extend([row["video_id"], stale_cutoff(row), max_duration_sec])
             await db.execute(
-                f"""DELETE FROM queue
-                    WHERE video_id IN ({placeholders})
-                      AND (
-                        status = 'expired'
-                        OR (status = 'pending' AND published_unix < ?)
-                        OR (status != 'playing' AND duration > ?)
-                      )""",
-                [row["video_id"] for row in rows] + [cutoff, max_duration_sec],
+                f"DELETE FROM queue WHERE {' OR '.join(conditions)}",
+                params,
             )
             await db.commit()
     doomed: list[Path] = []
@@ -471,7 +500,7 @@ async def purge_expired(keep_ids_now: set[str] | None = None) -> int:
         log.info("Removed %d expired queue videos and their files", len(rows))
     now_unix = int(time.time())
     for row in rows:
-        if row["status"] == "pending" and int(row["published_unix"] or 0) < cutoff:
+        if row["status"] == "pending" and int(row["published_unix"] or 0) < stale_cutoff(row):
             age_h = (now_unix - int(row["published_unix"] or 0)) / 3600.0
             title = " ".join(str(row.get("title") or "").split()) or row["video_id"]
             say(f"Fora das 24h ({age_h:.1f}h): {title}")
@@ -509,7 +538,7 @@ def download_blocked(row: dict) -> bool:
         return True
     if row.get("download_error"):
         return True
-    if published_too_old(int(row.get("published_unix") or 0)):
+    if int(row.get("published_unix") or 0) < stale_cutoff(row):
         return True
     max_duration_sec = settings.QUEUE_MAX_DURATION_MINUTES * 60 if settings.QUEUE_MAX_DURATION_MINUTES > 0 else 999999999
     if int(row.get("duration") or 0) > max_duration_sec:
@@ -524,7 +553,8 @@ def _downloadable(row: dict) -> bool:
 async def _one_row(video_id: str) -> dict | None:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT video_id, title, status, published_unix, local_path, duration FROM queue WHERE video_id = ?",
+            "SELECT video_id, title, status, published_unix, local_path, duration,"
+            " published_confidence FROM queue WHERE video_id = ?",
             (video_id,),
         )
         row = await cursor.fetchone()
@@ -1230,7 +1260,8 @@ async def _clear_missing_paths(rows: list[dict]) -> None:
 async def _queue_rows() -> list[dict]:
     async with get_db() as db:
         cursor = await db.execute(
-            "SELECT id, video_id, status, published_unix, local_path, play_order, duration, download_error FROM queue"
+            "SELECT id, video_id, status, published_unix, local_path, play_order, duration,"
+            " download_error, published_confidence FROM queue"
         )
         return [dict(row) for row in await cursor.fetchall()]
 

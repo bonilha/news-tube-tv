@@ -201,6 +201,45 @@ def relative_age_seconds(text: str | None) -> int | None:
     return int(match.group(1)) * seconds
 
 
+EXACT = "exact"
+APPROX = "approx"
+UNKNOWN = "unknown"
+# A date without a time can name the day before the real publish moment. One
+# extra day of room keeps a video that is only hours old from being dropped.
+APPROX_EXTRA_HOURS = 24
+
+
+def is_midnight(published_unix: int | None) -> bool:
+    """True when the stamp names a whole UTC day instead of a moment.
+
+    Invidious rounds some channels to 00:00:00, and a real publish time is never
+    exactly on the hour, so the modulo is a safe tell.
+    """
+    return bool(published_unix) and int(published_unix) % 86400 == 0
+
+
+def publish_confidence(
+    published_unix: int | None, payload: dict[str, Any] | None = None,
+) -> str:
+    """How much the stored publish time can be trusted."""
+    age = relative_age_seconds((payload or {}).get("publishedText"))
+    if age is not None and age > 0 and age % 86400 == 0:
+        # The text only counted whole days, so the moment is a lower bound.
+        return APPROX
+    if not published_unix:
+        return UNKNOWN
+    if is_midnight(published_unix):
+        return APPROX
+    return EXACT
+
+
+def window_hours(
+    confidence: str, max_age_hours: int = 24, approx_extra: int = APPROX_EXTRA_HOURS,
+) -> int:
+    """Age limit for a stamp: one day, or two while it is only a date."""
+    return max_age_hours + (approx_extra if confidence == APPROX else 0)
+
+
 def resolve_published(
     published_unix: int | None,
     published_text: str | None,
@@ -212,12 +251,14 @@ def resolve_published(
     still says "16 horas atrás". A midnight stamp must not replace that age.
     A real timestamp inside 24h is kept when the text only says "1 dia atrás".
     A real timestamp is also kept when the text is not relative.
+    A midnight stamp is kept as the day it names: the caller judges it as
+    approximate instead of throwing the video away.
     """
     age = relative_age_seconds(published_text)
     # "1 dia atrás" is a whole day. It must not replace a real stamp still inside 24h.
     known_fresh = (
         published_unix is not None
-        and published_unix % 86400 != 0
+        and not is_midnight(published_unix)
         and 0 <= (now_unix - int(published_unix)) < 86400
     )
     if age is not None:
@@ -226,9 +267,7 @@ def resolve_published(
         return now_unix - age
     if published_unix is None:
         return None
-    if published_unix % 86400 == 0:
-        return None
-    return published_unix
+    return int(published_unix)
 
 
 def members_only(payload: dict[str, Any] | None) -> bool:
@@ -243,7 +282,9 @@ def members_only(payload: dict[str, Any] | None) -> bool:
     return "member" in error.lower()
 
 
-async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | None, int | None, int]:
+async def video_title(
+    video_id: str, fallback: str, defer_published: bool = False,
+) -> tuple[str, int, bool | None, int | None, int]:
     """Title, height, members-only, published unix, and length from the video endpoint.
 
     The channel list ignores hl and sometimes stamps published as "now".
@@ -251,8 +292,8 @@ async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | No
     age in `publishedText` ("16 horas atrás"). That midnight is not returned.
     Members-only answers HTTP 500 with only `error`, which `_get` would throw away.
     Members is None when the request fails for another reason.
-    Published is None when the payload has no usable time, so the scan keeps
-    the channel-list timestamp.
+    Published is None when the payload has no usable time. defer_published keeps
+    the date-only stamp instead of dropping it, for a shelf that sent no time at all.
     """
     if not video_id:
         return fallback, 0, None, None, 0
@@ -282,6 +323,9 @@ async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | No
     import time as _time
 
     resolved = resolve_published(published_unix, data.get("publishedText"), int(_time.time()))
+    if resolved is None and defer_published and published_unix:
+        # A shelf item has no time of its own. A date-only stamp beats no date.
+        resolved = int(published_unix)
     return title, stream_max_height(data), False, resolved, length
 
 
@@ -348,11 +392,15 @@ def is_eligible(
     max_duration_minutes: int | float | None = None,
     allow_shorts: bool = False,
     defer_age: bool = False,
+    age_confidence: str | None = None,
 ) -> tuple[bool, str]:
     """Check if a video is eligible for the queue. Returns (eligible, reason).
 
     defer_age skips the publish-time checks. The shorts shelf sends published 0,
     and the scan fills the real unix time from the video endpoint before judging age.
+    A date-only or day-rounded stamp is judged one day wider, and never dropped
+    for being "new": Invidious answers 00:00:00 for those, which is the start of
+    the day, not the publish moment.
     """
     import time as _time
 
@@ -372,6 +420,7 @@ def is_eligible(
         return False, f"Duração longa demais ({length // 60}m > {max_minutes}m)"
 
     published = meta.get("publicacao_unix") or meta.get("published")
+    confidence = age_confidence or publish_confidence(published)
     if not defer_age:
         if not published:
             return False, "Sem data de publicação"
@@ -379,10 +428,13 @@ def is_eligible(
         now = now_unix if now_unix is not None else int(_time.time())
         age_hours = (now - int(published)) / 3600.0
 
-        if age_hours < min_age_hours:
+        # A date-only stamp names the start of the day, so it can only look older
+        # than the video is. Never drop it for being new, and judge the stale end
+        # one day wider.
+        if age_hours < min_age_hours and confidence == EXACT:
             return False, f"Novo demais ({age_hours:.1f}h < {min_age_hours:.1f}h)"
 
-        if age_hours >= 24:
+        if age_hours >= window_hours(confidence):
             return False, f"Fora das 24h ({age_hours:.1f}h)"
 
     paid = meta.get("paid") or meta.get("premium")
@@ -428,6 +480,7 @@ def normalize_video(payload: dict[str, Any]) -> dict[str, Any]:
         "authorUrl": author_url,
         "handle": handle,
         "published": published_unix,
+        "published_confidence": publish_confidence(published_unix, payload),
         "duracao": length,
         "type": str(payload.get("type") or "video").lower(),
         "liveNow": bool(payload.get("liveNow")),

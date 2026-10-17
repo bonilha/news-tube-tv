@@ -13,7 +13,7 @@ from app.obs.manager import SCENE_BUMPER, SCENE_PROGRAM, obs_manager
 from app.overlay import service as overlay
 from app.queue import cookies as yt_cookies
 from app.queue import download as queue_download
-from app.queue.download import published_too_old, ready_wait_seconds
+from app.queue.download import published_too_old, ready_wait_seconds, stale_cutoff
 from app.queue import service as queue_svc
 
 log = logging.getLogger(__name__)
@@ -51,12 +51,16 @@ class _State(Enum):
 
 
 def ids_to_protect(rows: list[dict], on_air: str) -> set[str]:
-    """Ids purge must not delete. The file OBS has open stays even after 24h."""
+    """Ids purge must not delete. The file OBS has open stays even after 24h.
+
+    A row whose publish time is only a whole day gets the same wider clock the
+    window uses, so it is not lost while it is still inside the day it names.
+    """
     ids = {
         row["video_id"]
         for row in rows
         if row.get("video_id")
-        and not published_too_old(int(row.get("published_unix") or 0))
+        and int(row.get("published_unix") or 0) >= stale_cutoff(row)
     }
     if on_air:
         ids.add(on_air)

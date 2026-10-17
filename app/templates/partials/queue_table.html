@@ -65,7 +65,7 @@
             </td>
             <td class="text-muted text-sm">
                 {% if item.published_unix %}
-                    {{ item.published_unix | int | timestamp_fmt }}
+                    {{ item.published_unix | int | timestamp_fmt }}{% if item.published_confidence == 'approx' %}<span title="O Invidious só informou o dia desta publicação; a hora é aproximada."> ≈</span>{% endif %}
                 {% else %}
                     —
                 {% endif %}

@@ -131,13 +131,16 @@ async def _scan_channel(
     }
     if not allow_shorts:
         shorts_ids = await invidious.channel_shorts_ids(channel_id)
+        from_shelf: set[str] = set()
     else:
         seen = {item.get("videoId") or item.get("videoID") for item in videos}
+        from_shelf = set()
         for item in shorts:
             video_id = item.get("videoId") or item.get("videoID")
             if video_id and video_id not in seen:
                 videos.append(item)
                 seen.add(video_id)
+                from_shelf.add(video_id)
 
     added = 0
     skipped = 0
@@ -159,23 +162,27 @@ async def _scan_channel(
 
     for raw in videos:
         meta = invidious.normalize_video(raw)
+        list_confidence = meta.get("published_confidence") or invidious.UNKNOWN
         google_stamp = google_published.get(meta["video_id"])
         if google_stamp:
             meta["published"] = google_stamp
+            list_confidence = invidious.EXACT
         is_short = int(invidious.classify_video(meta, shorts_ids) == "short")
         # The shorts shelf sends published 0 and lengthSeconds 60. Judge type,
         # duration, and paid status from the list, then age from the video endpoint.
-        missing_time = not meta.get("published")
+        # Only a shelf item needs that: the video list always carries a time.
+        missing_time = meta["video_id"] in from_shelf
         eligible, reason = invidious.is_eligible(
             meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
             allow_shorts=allow_shorts, defer_age=missing_time,
+            age_confidence=list_confidence,
         )
         if not eligible:
             skipped += 1
             _note_skip(reasons, reason)
             continue
         detail_title, meta["max_height"], members, detail_published, detail_length = await invidious.video_title(
-            meta["video_id"], "",
+            meta["video_id"], "", defer_published=missing_time,
         )
         if members:
             await queue_download.delete_queue_video(meta["video_id"])
@@ -193,12 +200,20 @@ async def _scan_channel(
         # A Google publishedAt is exact. Invidious "1 dia atrás" must not replace it.
         if detail_published and not google_stamp:
             meta["published"] = detail_published
+        meta["published_confidence"] = (
+            invidious.EXACT if google_stamp
+            else invidious.publish_confidence(meta.get("published"), raw)
+        )
         still_ok, reason = invidious.is_eligible(
             meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
             allow_shorts=allow_shorts,
+            age_confidence=meta.get("published_confidence"),
         )
         if not still_ok:
-            await queue_download.delete_queue_video(meta["video_id"])
+            # A date-only stamp can make a video look stale while it is only
+            # hours old. Only a stamp that claims to be exact may remove a row.
+            if meta.get("published_confidence") == invidious.EXACT:
+                await queue_download.delete_queue_video(meta["video_id"])
             skipped += 1
             _note_skip(reasons, reason)
             continue
@@ -208,8 +223,8 @@ async def _scan_channel(
             async with get_db() as db:
                 cursor = await db.execute(
                     """INSERT OR IGNORE INTO queue
-                       (channel_id, video_id, title, author, duration, published_unix, thumb, play_order, max_height, is_short)
-                       SELECT id, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                       (channel_id, video_id, title, author, duration, published_unix, thumb, play_order, max_height, is_short, published_confidence)
+                       SELECT id, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                        FROM channels WHERE channel_id = ?
                        LIMIT 1""",
                     (
@@ -222,6 +237,7 @@ async def _scan_channel(
                         play_order,
                         int(meta.get("max_height") or 0),
                         is_short,
+                        meta.get("published_confidence") or invidious.UNKNOWN,
                         channel_id,
                     ),
                 )
@@ -230,7 +246,8 @@ async def _scan_channel(
                 inserted = bool(cursor.rowcount)
                 await db.execute(
                     """UPDATE queue
-                       SET title = ?, thumb = ?, max_height = ?, is_short = ?, published_unix = ?, duration = ?
+                       SET title = ?, thumb = ?, max_height = ?, is_short = ?, published_unix = ?, duration = ?,
+                           published_confidence = ?
                        WHERE video_id = ?""",
                     (
                         meta["title"],
@@ -239,6 +256,7 @@ async def _scan_channel(
                         is_short,
                         meta["published"] or 0,
                         meta["duracao"],
+                        meta.get("published_confidence") or invidious.UNKNOWN,
                         meta["video_id"],
                     ),
                 )
@@ -273,7 +291,7 @@ async def get_queue(status: str = "pending") -> list[dict]:
             f"""SELECT q.id, q.video_id, q.title, q.author, q.duration,
                       q.published_unix, q.thumb, q.status, q.added_at,
                       q.local_path, q.download_error, q.play_order, q.play_count,
-                      q.is_short,
+                      q.is_short, q.published_confidence,
                       c.name as channel_name, c.channel_id, c.active
                FROM queue q
                JOIN channels c ON c.id = q.channel_id
@@ -291,7 +309,7 @@ async def get_queue_full() -> list[dict]:
             f"""SELECT q.id, q.video_id, q.title, q.author, q.duration,
                       q.published_unix, q.thumb, q.status, q.added_at,
                       q.local_path, q.download_error, q.play_order, q.play_count,
-                      q.is_short,
+                      q.is_short, q.published_confidence,
                       c.name as channel_name, c.channel_id, c.active
                FROM queue q
                JOIN channels c ON c.id = q.channel_id

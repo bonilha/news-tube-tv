@@ -41,7 +41,7 @@ def test_video_detail_runs_outside_the_database(monkeypatch, tmp_path):
 
     detail_published = int(time.time()) - 7200
 
-    async def detail(_video_id, _fallback):
+    async def detail(_video_id, _fallback, defer_published=False):
         assert open_depth == 0
         return "Título em português", 1080, False, detail_published, 90
 
@@ -90,7 +90,7 @@ def test_detail_publish_time_drops_a_video_the_list_called_new(monkeypatch, tmp_
     async def no_shorts(_channel_id):
         return set()
 
-    async def detail(_video_id, _fallback):
+    async def detail(_video_id, _fallback, defer_published=False):
         return "LULA E VELHA MÍDIA", 1080, False, now - (120 * 86400), 600
 
     monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
@@ -144,7 +144,7 @@ def test_shorts_shelf_published_zero_uses_the_video_time(monkeypatch, tmp_path):
             "videoThumbnails": [],
         }]
 
-    async def detail(_video_id, _fallback):
+    async def detail(_video_id, _fallback, defer_published=False):
         return "Estamos na frente", 1080, False, now - 5 * 3600, 104
 
     monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
@@ -194,7 +194,7 @@ def test_shorts_shelf_still_drops_a_detail_older_than_a_day(monkeypatch, tmp_pat
             "videoThumbnails": [],
         }]
 
-    async def detail(_video_id, _fallback):
+    async def detail(_video_id, _fallback, defer_published=False):
         return "Velho", 1080, False, now - 30 * 3600, 40
 
     monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
@@ -223,7 +223,7 @@ def test_shorts_shelf_still_drops_a_detail_older_than_a_day(monkeypatch, tmp_pat
 
 
 def test_relative_text_beats_utc_midnight():
-    from app.yt.invidious import resolve_published
+    from app.yt.invidious import APPROX, publish_confidence, resolve_published
 
     now = 1_792_250_000
     midnight = now - (now % 86400) - 86400
@@ -232,7 +232,10 @@ def test_relative_text_beats_utc_midnight():
     assert resolve_published(midnight, "23 hours ago", now) == now - 23 * 3600
     assert resolve_published(midnight, "1 dia atrás", now) == now - 86400
     assert resolve_published(midnight, "1 day ago", now) == now - 86400
-    assert resolve_published(midnight, None, now) is None
+    # No relative text: the day it names is kept, and the scan judges it as a
+    # lower bound instead of throwing the video away.
+    assert resolve_published(midnight, None, now) == midnight
+    assert publish_confidence(midnight) == APPROX
     precise = now - 3 * 3600
     assert resolve_published(precise, "16 de out. de 2026", now) == precise
     assert resolve_published(precise, "1 dia atrás", now) == precise
@@ -325,7 +328,7 @@ def test_google_published_at_is_not_replaced_by_one_day_ago(monkeypatch, tmp_pat
     async def no_shorts(_channel_id):
         return set()
 
-    async def detail(_video_id, _fallback):
+    async def detail(_video_id, _fallback, defer_published=False):
         # Invidious rounded this to a full day. The scan must keep Google's stamp.
         return "Título em português", 1080, False, exact - 86400, 600
 

@@ -121,6 +121,12 @@ async def init_db() -> None:
             await db.execute(
                 "ALTER TABLE queue ADD COLUMN is_short INTEGER NOT NULL DEFAULT 0"
             )
+        if "published_confidence" not in columns:
+            # exact | approx | unknown. `approx` widens the age window by a day,
+            # because Invidious answers 00:00:00 for channels it cannot date.
+            await db.execute(
+                "ALTER TABLE queue ADD COLUMN published_confidence TEXT NOT NULL DEFAULT 'exact'"
+            )
         cursor = await db.execute("PRAGMA table_info(broadcast_control)")
         control_columns = {row[1] for row in await cursor.fetchall()}
         cursor = await db.execute("PRAGMA table_info(channels)")
