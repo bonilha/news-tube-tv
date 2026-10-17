@@ -235,6 +235,7 @@ def test_relative_text_beats_utc_midnight():
     assert resolve_published(midnight, None, now) is None
     precise = now - 3 * 3600
     assert resolve_published(precise, "16 de out. de 2026", now) == precise
+    assert resolve_published(precise, "1 dia atrás", now) == precise
 
 
 def test_scan_keeps_a_16h_video_when_detail_unix_is_yesterday_midnight(monkeypatch, tmp_path):
@@ -302,5 +303,56 @@ def test_scan_keeps_a_16h_video_when_detail_unix_is_yesterday_midnight(monkeypat
             row = await cursor.fetchone()
         assert row["published_unix"] != midnight
         assert now - int(row["published_unix"]) < 24 * 3600
+
+    asyncio.run(run())
+
+
+def test_google_published_at_is_not_replaced_by_one_day_ago(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "DB_PATH", tmp_path / "scan.db")
+    exact = int(time.time()) - 16 * 3600
+
+    async def videos(_channel_id, sort_by="newest"):
+        return [{
+            "videoId": "abcdefghijk",
+            "title": "English list title",
+            "author": "ANCAPSU",
+            "lengthSeconds": 600,
+            "published": exact - 86400,
+            "type": "video",
+            "videoThumbnails": [],
+        }]
+
+    async def no_shorts(_channel_id):
+        return set()
+
+    async def detail(_video_id, _fallback):
+        # Invidious rounded this to a full day. The scan must keep Google's stamp.
+        return "Título em português", 1080, False, exact - 86400, 600
+
+    async def google(ids):
+        assert ids == ["abcdefghijk"]
+        return {"abcdefghijk": exact}
+
+    monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
+    monkeypatch.setattr(queue_svc.invidious, "channel_shorts_ids", no_shorts)
+    monkeypatch.setattr(queue_svc.invidious, "video_title", detail)
+    monkeypatch.setattr(queue_svc.google_yt, "fetch_videos_published_at", google)
+
+    async def run():
+        await init_db()
+        async with get_db() as db:
+            await db.execute(
+                "INSERT INTO channels (name, channel_id, min_age_hours) VALUES ('ANCAPSU', 'UC1', 0)"
+            )
+            await db.commit()
+        added, skipped = await queue_svc._scan_channel("UC1", 0, "ANCAPSU")
+        assert added == 1
+        assert skipped == 0
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT published_unix FROM queue WHERE video_id = 'abcdefghijk'"
+            )
+            row = await cursor.fetchone()
+        assert row["published_unix"] == exact
 
     asyncio.run(run())

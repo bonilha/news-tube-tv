@@ -210,10 +210,19 @@ def resolve_published(
 
     Invidious often stores only UTC midnight in `published` while `publishedText`
     still says "16 horas atrás". A midnight stamp must not replace that age.
-    A real timestamp (not divisible by 86400) is kept when the text is not relative.
+    A real timestamp inside 24h is kept when the text only says "1 dia atrás".
+    A real timestamp is also kept when the text is not relative.
     """
     age = relative_age_seconds(published_text)
+    # "1 dia atrás" is a whole day. It must not replace a real stamp still inside 24h.
+    known_fresh = (
+        published_unix is not None
+        and published_unix % 86400 != 0
+        and 0 <= (now_unix - int(published_unix)) < 86400
+    )
     if age is not None:
+        if known_fresh and age >= 86400:
+            return int(published_unix)
         return now_unix - age
     if published_unix is None:
         return None

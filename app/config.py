@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Invidious instance for YouTube data
     INVIDIOUS_URL: str = "http://192.168.66.170:3000"
 
+    # YouTube Data API v3. Used only for exact publishedAt. Empty skips Google.
+    YOUTUBE_API_KEY: str = "AIzaSyA9Q9we1-PK5wP25gyLXKZxVdg3WNlyqUs"
+
     # Language sent to Invidious (hl). Titles use this when a translation exists.
     CONTENT_LANGUAGE: str = "pt-BR"
 

@@ -10,7 +10,7 @@ from pathlib import Path
 from app.config import settings
 from app.database import get_db
 from app.queue import download as queue_download
-from app.yt import invidious
+from app.yt import google_yt, invidious
 from app.yt.invidious import InvidiousError
 
 log = logging.getLogger(__name__)
@@ -107,6 +107,11 @@ async def _scan_channel(
     added = 0
     skipped = 0
     now = int(time.time())
+    video_ids = [
+        str(item.get("videoId") or item.get("videoID") or "")
+        for item in videos
+    ]
+    google_published = await google_yt.fetch_videos_published_at(video_ids)
 
     # The read is its own transaction. video_title talks to Invidious and must
     # not run while this process holds a write lock, or the 15s scheduler hits
@@ -118,6 +123,9 @@ async def _scan_channel(
 
     for raw in videos:
         meta = invidious.normalize_video(raw)
+        google_stamp = google_published.get(meta["video_id"])
+        if google_stamp:
+            meta["published"] = google_stamp
         is_short = int(invidious.classify_video(meta, shorts_ids) == "short")
         # The shorts shelf sends published 0 and lengthSeconds 60. Judge type,
         # duration, and paid status from the list, then age from the video endpoint.
@@ -144,7 +152,8 @@ async def _scan_channel(
         meta["title"] = detail_title
         if detail_length:
             meta["duracao"] = detail_length
-        if detail_published:
+        # A Google publishedAt is exact. Invidious "1 dia atrás" must not replace it.
+        if detail_published and not google_stamp:
             meta["published"] = detail_published
         still_ok, _reason = invidious.is_eligible(
             meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,

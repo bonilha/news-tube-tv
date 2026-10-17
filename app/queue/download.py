@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,7 +29,13 @@ def say(message: str, now: datetime | None = None) -> None:
     """
     moment = now or datetime.now()
     stamp = moment.strftime("%Y-%m-%d %H:%M:%S")
-    print(f"NewsTube {stamp} {message}", flush=True)
+    line = f"NewsTube {stamp} {message}"
+    try:
+        print(line, flush=True)
+    except UnicodeEncodeError:
+        encoding = sys.stdout.encoding or "utf-8"
+        safe_line = line.encode(encoding, errors="replace").decode(encoding)
+        print(safe_line, flush=True)
 
 
 def _label(row: dict | None, video_id: str) -> str:
