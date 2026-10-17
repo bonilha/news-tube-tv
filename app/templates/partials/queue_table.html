@@ -22,6 +22,7 @@
             <th>Title</th>
             <th>Channel</th>
             <th>Duration</th>
+            <th>Tipo</th>
             <th>Published</th>
             <th>Status</th>
             <th>File</th>
@@ -51,6 +52,9 @@
                 {% set m = ((item.duration % 3600) // 60) %}
                 {% set s = (item.duration % 60) %}
                 {% if h %}{{ h }}:{% endif %}{{ '%02d'|format(m) }}:{{ '%02d'|format(s) }}
+            </td>
+            <td class="text-sm">
+                {% if item.is_short %}Short{% else %}Normal{% endif %}
             </td>
             <td class="text-muted text-sm">
                 {% if item.published_unix %}

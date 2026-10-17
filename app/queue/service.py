@@ -221,6 +221,7 @@ async def get_queue(status: str = "pending") -> list[dict]:
             f"""SELECT q.id, q.video_id, q.title, q.author, q.duration,
                       q.published_unix, q.thumb, q.status, q.added_at,
                       q.local_path, q.download_error, q.play_order, q.play_count,
+                      q.is_short,
                       c.name as channel_name, c.channel_id, c.active
                FROM queue q
                JOIN channels c ON c.id = q.channel_id
@@ -238,6 +239,7 @@ async def get_queue_full() -> list[dict]:
             f"""SELECT q.id, q.video_id, q.title, q.author, q.duration,
                       q.published_unix, q.thumb, q.status, q.added_at,
                       q.local_path, q.download_error, q.play_order, q.play_count,
+                      q.is_short,
                       c.name as channel_name, c.channel_id, c.active
                FROM queue q
                JOIN channels c ON c.id = q.channel_id
