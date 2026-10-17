@@ -119,14 +119,17 @@ async def _scan_channel(
     for raw in videos:
         meta = invidious.normalize_video(raw)
         is_short = int(invidious.classify_video(meta, shorts_ids) == "short")
+        # The shorts shelf sends published 0 and lengthSeconds 60. Judge type,
+        # duration, and paid status from the list, then age from the video endpoint.
+        missing_time = not meta.get("published")
         eligible, _reason = invidious.is_eligible(
             meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
-            allow_shorts=allow_shorts,
+            allow_shorts=allow_shorts, defer_age=missing_time,
         )
         if not eligible:
             skipped += 1
             continue
-        detail_title, meta["max_height"], members, detail_published = await invidious.video_title(
+        detail_title, meta["max_height"], members, detail_published, detail_length = await invidious.video_title(
             meta["video_id"], "",
         )
         if members:
@@ -139,18 +142,18 @@ async def _scan_channel(
             skipped += 1
             continue
         meta["title"] = detail_title
-        # The channel list can stamp published as "0 seconds ago". The
-        # video endpoint has the real unix time.
-        if detail_published is not None:
+        if detail_length:
+            meta["duracao"] = detail_length
+        if detail_published:
             meta["published"] = detail_published
-            still_ok, _reason = invidious.is_eligible(
-                meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
-                allow_shorts=allow_shorts,
-            )
-            if not still_ok:
-                await queue_download.delete_queue_video(meta["video_id"])
-                skipped += 1
-                continue
+        still_ok, _reason = invidious.is_eligible(
+            meta, min_age_hours, shorts_ids=shorts_ids, now_unix=now,
+            allow_shorts=allow_shorts,
+        )
+        if not still_ok:
+            await queue_download.delete_queue_video(meta["video_id"])
+            skipped += 1
+            continue
 
         try:
             play_order = next_order + 1 if next_order > 0 else 0
@@ -179,7 +182,7 @@ async def _scan_channel(
                 inserted = bool(cursor.rowcount)
                 await db.execute(
                     """UPDATE queue
-                       SET title = ?, thumb = ?, max_height = ?, is_short = ?, published_unix = ?
+                       SET title = ?, thumb = ?, max_height = ?, is_short = ?, published_unix = ?, duration = ?
                        WHERE video_id = ?""",
                     (
                         meta["title"],
@@ -187,6 +190,7 @@ async def _scan_channel(
                         int(meta.get("max_height") or 0),
                         is_short,
                         meta["published"] or 0,
+                        meta["duracao"],
                         meta["video_id"],
                     ),
                 )

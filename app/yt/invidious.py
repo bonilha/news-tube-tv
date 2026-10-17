@@ -164,8 +164,8 @@ def members_only(payload: dict[str, Any] | None) -> bool:
     return "member" in error.lower()
 
 
-async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | None, int | None]:
-    """Title, height, members-only, and published unix from the video endpoint.
+async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | None, int | None, int]:
+    """Title, height, members-only, published unix, and length from the video endpoint.
 
     The channel list ignores hl and sometimes stamps published as "now"
     with 0 views. The real publish time is on GET /videos/:id.
@@ -174,27 +174,31 @@ async def video_title(video_id: str, fallback: str) -> tuple[str, int, bool | No
     Published is None when the payload has no usable unix time.
     """
     if not video_id:
-        return fallback, 0, None, None
+        return fallback, 0, None, None, 0
     url = f"{_api_url()}/videos/{video_id}"
     try:
         async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
             resp = await client.get(url, params={"hl": content_language()})
             data = resp.json()
     except (httpx.HTTPError, ValueError):
-        return fallback, 0, None, None
+        return fallback, 0, None, None, 0
     if not isinstance(data, dict):
-        return fallback, 0, None, None
+        return fallback, 0, None, None, 0
     if members_only(data):
-        return fallback, 0, True, None
+        return fallback, 0, True, None, 0
     if resp.status_code >= 400 or data.get("error"):
-        return fallback, 0, None, None
+        return fallback, 0, None, None, 0
     title = (data.get("title") or "").strip() or fallback
     published = data.get("published")
     try:
-        published_unix = int(published) if published is not None else None
+        published_unix = int(published) if published else None
     except (TypeError, ValueError):
         published_unix = None
-    return title, stream_max_height(data), False, published_unix
+    try:
+        length = int(data.get("lengthSeconds") or 0)
+    except (TypeError, ValueError):
+        length = 0
+    return title, stream_max_height(data), False, published_unix, length
 
 
 async def channel_videos(ucid: str, sort_by: str = "newest") -> list[dict[str, Any]]:
@@ -259,8 +263,13 @@ def is_eligible(
     now_unix: int | None = None,
     max_duration_minutes: int | float | None = None,
     allow_shorts: bool = False,
+    defer_age: bool = False,
 ) -> tuple[bool, str]:
-    """Check if a video is eligible for the queue. Returns (eligible, reason)."""
+    """Check if a video is eligible for the queue. Returns (eligible, reason).
+
+    defer_age skips the publish-time checks. The shorts shelf sends published 0,
+    and the scan fills the real unix time from the video endpoint before judging age.
+    """
     import time as _time
 
     classification = classify_video(meta, shorts_ids)
@@ -279,17 +288,18 @@ def is_eligible(
         return False, f"Duração longa demais ({length // 60}m > {max_minutes}m)"
 
     published = meta.get("publicacao_unix") or meta.get("published")
-    if published is None:
-        return False, "Sem data de publicação"
+    if not defer_age:
+        if not published:
+            return False, "Sem data de publicação"
 
-    now = now_unix if now_unix is not None else int(_time.time())
-    age_hours = (now - int(published)) / 3600.0
+        now = now_unix if now_unix is not None else int(_time.time())
+        age_hours = (now - int(published)) / 3600.0
 
-    if age_hours < min_age_hours:
-        return False, f"Novo demais ({age_hours:.1f}h < {min_age_hours:.1f}h)"
+        if age_hours < min_age_hours:
+            return False, f"Novo demais ({age_hours:.1f}h < {min_age_hours:.1f}h)"
 
-    if age_hours >= 24:
-        return False, f"Fora das 24h ({age_hours:.1f}h)"
+        if age_hours >= 24:
+            return False, f"Fora das 24h ({age_hours:.1f}h)"
 
     paid = meta.get("paid") or meta.get("premium")
     if paid:

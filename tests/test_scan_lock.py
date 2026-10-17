@@ -43,7 +43,7 @@ def test_video_detail_runs_outside_the_database(monkeypatch, tmp_path):
 
     async def detail(_video_id, _fallback):
         assert open_depth == 0
-        return "Título em português", 1080, False, detail_published
+        return "Título em português", 1080, False, detail_published, 90
 
     monkeypatch.setattr(queue_svc, "get_db", tracking)
     monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
@@ -91,7 +91,7 @@ def test_detail_publish_time_drops_a_video_the_list_called_new(monkeypatch, tmp_
         return set()
 
     async def detail(_video_id, _fallback):
-        return "LULA E VELHA MÍDIA", 1080, False, now - (120 * 86400)
+        return "LULA E VELHA MÍDIA", 1080, False, now - (120 * 86400), 600
 
     monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
     monkeypatch.setattr(queue_svc.invidious, "channel_shorts_ids", no_shorts)
@@ -119,6 +119,102 @@ def test_detail_publish_time_drops_a_video_the_list_called_new(monkeypatch, tmp_
         async with get_db() as db:
             cursor = await db.execute(
                 "SELECT video_id FROM queue WHERE video_id = 'vZvLAxxNbk1'"
+            )
+            row = await cursor.fetchone()
+        assert row is None
+
+    asyncio.run(run())
+
+
+def test_shorts_shelf_published_zero_uses_the_video_time(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "DB_PATH", tmp_path / "scan.db")
+    now = int(time.time())
+
+    async def videos(_channel_id, sort_by="newest"):
+        return []
+
+    async def shorts(_channel_id, sort_by="newest"):
+        return [{
+            "videoId": "J4j65eB51Uc",
+            "title": "English shelf title",
+            "author": "Jeffrey Chiquini",
+            "lengthSeconds": 60,
+            "published": 0,
+            "type": "video",
+            "videoThumbnails": [],
+        }]
+
+    async def detail(_video_id, _fallback):
+        return "Estamos na frente", 1080, False, now - 5 * 3600, 104
+
+    monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
+    monkeypatch.setattr(queue_svc.invidious, "channel_shorts", shorts)
+    monkeypatch.setattr(queue_svc.invidious, "video_title", detail)
+
+    async def run():
+        await init_db()
+        async with get_db() as db:
+            await db.execute(
+                "INSERT INTO channels (name, channel_id, min_age_hours, enable_shorts) "
+                "VALUES ('Jeffrey Chiquini', 'UC1', 2, 1)"
+            )
+            await db.commit()
+        added, skipped = await queue_svc._scan_channel("UC1", 2, "Jeffrey Chiquini")
+        assert added == 1
+        assert skipped == 0
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT is_short, duration, published_unix, title FROM queue "
+                "WHERE video_id = 'J4j65eB51Uc'"
+            )
+            row = await cursor.fetchone()
+        assert row["is_short"] == 1
+        assert row["duration"] == 104
+        assert row["published_unix"] == now - 5 * 3600
+        assert row["title"] == "Estamos na frente"
+
+    asyncio.run(run())
+
+
+def test_shorts_shelf_still_drops_a_detail_older_than_a_day(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "DB_PATH", tmp_path / "scan.db")
+    now = int(time.time())
+
+    async def videos(_channel_id, sort_by="newest"):
+        return []
+
+    async def shorts(_channel_id, sort_by="newest"):
+        return [{
+            "videoId": "oldshort1111",
+            "title": "Old",
+            "author": "Canal",
+            "lengthSeconds": 60,
+            "published": 0,
+            "type": "video",
+            "videoThumbnails": [],
+        }]
+
+    async def detail(_video_id, _fallback):
+        return "Velho", 1080, False, now - 30 * 3600, 40
+
+    monkeypatch.setattr(queue_svc.invidious, "channel_videos", videos)
+    monkeypatch.setattr(queue_svc.invidious, "channel_shorts", shorts)
+    monkeypatch.setattr(queue_svc.invidious, "video_title", detail)
+
+    async def run():
+        await init_db()
+        async with get_db() as db:
+            await db.execute(
+                "INSERT INTO channels (name, channel_id, min_age_hours, enable_shorts) "
+                "VALUES ('C', 'UC1', 0, 1)"
+            )
+            await db.commit()
+        added, skipped = await queue_svc._scan_channel("UC1", 0, "C")
+        assert added == 0
+        assert skipped == 1
+        async with get_db() as db:
+            cursor = await db.execute(
+                "SELECT video_id FROM queue WHERE video_id = 'oldshort1111'"
             )
             row = await cursor.fetchone()
         assert row is None
