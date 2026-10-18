@@ -244,9 +244,7 @@ def _accept_file(*, publish: bool = True) -> bool:
     except Exception as exc:
         text = str(exc)
         log.warning("Cookie probe failed: %s", text[:400])
-        if _page_reload(text):
-            reason = _reload_message()
-        elif looks_like_cookie_failure(text):
+        if looks_like_cookie_failure(text):
             reason = (
                 "O YouTube recusou os cookies no yt-dlp. Atualize o arquivo em cookies. "
                 "Os vídeos não serão baixados."
@@ -418,10 +416,15 @@ def _probe(cookiefile: Path) -> None:
         "extract_flat": False,
         "extractor_args": {"youtube": {"player_client": ["default"]}},
     }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(_PROBE_URL, download=False)
-    if not _has_video(info):
-        raise RuntimeError("yt-dlp não listou vídeo no vídeo de teste")
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(_PROBE_URL, download=False)
+        if not _has_video(info):
+            raise RuntimeError("yt-dlp não listou vídeo no vídeo de teste")
+    except Exception as exc:
+        if _page_reload(str(exc)):
+            return
+        raise
 
 
 def _page_reload(text: str) -> bool:
