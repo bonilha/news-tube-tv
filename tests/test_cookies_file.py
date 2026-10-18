@@ -105,6 +105,51 @@ def test_check_without_retry_does_not_open_a_browser(monkeypatch, tmp_path):
     assert yt_cookies.status()["ok"] is False
 
 
+def test_export_uses_the_yt_dlp_command(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+    seen = []
+
+    def _run(args, **kwargs):
+        seen.append(list(args))
+        dest = args[args.index("--cookies") + 1]
+        open(dest, "w", encoding="utf-8").write(_NETSCAPE)
+        completed = type("Completed", (), {})()
+        completed.returncode = 0
+        completed.stderr = ""
+        completed.stdout = ""
+        return completed
+
+    monkeypatch.setattr(yt_cookies.subprocess, "run", _run)
+    yt_cookies.export_browser_cookies("firefox")
+    command = seen[0]
+    assert command[1:3] == ["-m", "yt_dlp"]
+    assert command[command.index("--cookies-from-browser") + 1] == "firefox"
+    assert command[command.index("--cookies") + 1].endswith("cookiesyoutube.txt")
+    assert "--skip-download" in command
+    assert command[-1] == "https://www.youtube.com/watch?v=qvsZpbDnl2E"
+    assert "LOGIN_INFO" in yt_cookies.cookie_file().read_text(encoding="utf-8")
+
+
+def test_reload_error_is_not_called_a_dead_session(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+    yt_cookies.store_netscape(_NETSCAPE)
+
+    def _probe(path):
+        raise RuntimeError("ERROR: [youtube] qvsZpbDnl2E: The page needs to be reloaded.")
+
+    def _export(browser, dest=None):
+        raise yt_cookies.BrowserCookiesError(f"falha {browser}")
+
+    monkeypatch.setattr(yt_cookies, "_probe", _probe)
+    monkeypatch.setattr(yt_cookies, "export_browser_cookies", _export)
+    assert yt_cookies.check_cookies() is False
+    message = yt_cookies.status()["message"]
+    assert "recarregar a página" in message
+    assert "recusados" not in message
+    assert "falha firefox" in message
+    assert "falha edge" in message
+
+
 def test_edge_button_error_stays_a_page_error(monkeypatch, tmp_path):
     _reset(monkeypatch, tmp_path)
 

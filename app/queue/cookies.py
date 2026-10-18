@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -20,7 +22,8 @@ _source_mtime = -1.0
 _netscape_path: Path | None = None
 _pending_message = ""
 
-_PROBE_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
+_PROBE_URL = "https://www.youtube.com/watch?v=qvsZpbDnl2E"
+_EXPORT_TIMEOUT = 120
 _AUTH_NAMES = frozenset({
     "LOGIN_INFO", "SID", "SAPISID",
     "__Secure-1PSID", "__Secure-3PSID",
@@ -96,45 +99,64 @@ def store_netscape(text: str) -> None:
     invalidate()
 
 
-def export_browser_cookies(browser: str, dest: Path | None = None) -> Path:
-    """Load a browser profile the way `--cookies-from-browser` does and dump a Netscape file.
+def _export_command(browser: str, dest: Path) -> list[str]:
+    """Same flags as `yt-dlp --cookies-from-browser BROWSER --cookies FILE URL`."""
+    return [
+        sys.executable, "-m", "yt_dlp",
+        "--cookies-from-browser", browser,
+        "--cookies", str(dest),
+        "--skip-download",
+        "--quiet",
+        "--no-warnings",
+        _PROBE_URL,
+    ]
 
-    The file is written only when the jar has a YouTube session. A locked database
-    or a browser with no session leaves the current file in place.
+
+def _restore_cookie_file(dest: Path, previous: str | None) -> None:
+    if previous is None:
+        if dest.is_file():
+            dest.unlink()
+        return
+    dest.write_text(previous, encoding="utf-8")
+
+
+def export_browser_cookies(browser: str, dest: Path | None = None) -> Path:
+    """Run yt-dlp so it reads the browser and writes the Netscape file.
+
+    A failed run puts the previous file back. A browser with no YouTube session
+    does not replace a file that was already there.
     """
     dest = dest or cookie_file()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    previous = dest.read_text(encoding="utf-8") if dest.is_file() else None
     label = "Firefox" if browser == "firefox" else "Microsoft Edge"
     try:
-        import yt_dlp
-        from yt_dlp.cookies import CookieLoadError
-        opts = {
-            "cookiesfrombrowser": (browser, None, None, None),
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": True,
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            try:
-                jar = ydl.cookiejar
-            except CookieLoadError as exc:
-                raise BrowserCookiesError(
-                    f"Não foi possível ler os cookies do {label}."
-                ) from exc
-            names = {cookie.name for cookie in jar}
-            if not (names & _AUTH_NAMES):
-                raise BrowserCookiesError(
-                    f"O {label} não tem sessão do YouTube. "
-                    "Entre no YouTube nesse navegador e tente de novo."
-                )
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            jar.save(str(dest))
-    except BrowserCookiesError:
-        raise
-    except Exception as exc:
+        completed = subprocess.run(
+            _export_command(browser, dest),
+            capture_output=True,
+            text=True,
+            timeout=_EXPORT_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _restore_cookie_file(dest, previous)
         log.warning("Cookie export from %s failed: %s", browser, exc)
         raise BrowserCookiesError(
             f"Não foi possível ler os cookies do {label}."
         ) from exc
+    detail = (completed.stderr or completed.stdout or "").strip()
+    wrote_session = completed.returncode == 0 and dest.is_file() and _has_login(dest)
+    if not wrote_session:
+        _restore_cookie_file(dest, previous)
+        log.warning("Cookie export from %s failed: %s", browser, detail[:400])
+        if completed.returncode == 0:
+            raise BrowserCookiesError(
+                f"O {label} não tem sessão do YouTube. "
+                "Entre no YouTube nesse navegador e tente de novo."
+            )
+        raise BrowserCookiesError(
+            f"Não foi possível ler os cookies do {label}."
+        )
     invalidate()
     return dest
 
@@ -171,6 +193,13 @@ def check_cookies(*, try_edge: bool = True) -> bool:
         if _accept_file(publish=False):
             return True
         notes.append(_pending_message)
+    if _page_reload(_pending_message) or _page_reload(file_note):
+        faults = " ".join(note for note in notes if note and not _page_reload(note))
+        message = _reload_message()
+        if faults:
+            message = f"{message} {faults}"
+        mark_rejected(message)
+        return False
     detail = " ".join(part for part in (file_note, *notes) if part)
     mark_rejected(
         f"{detail} Os cookies lidos do Firefox e do Edge também foram recusados."
@@ -210,7 +239,9 @@ def _accept_file(*, publish: bool = True) -> bool:
     except Exception as exc:
         text = str(exc)
         log.warning("Cookie probe failed: %s", text[:400])
-        if looks_like_cookie_failure(text):
+        if _page_reload(text):
+            reason = _reload_message()
+        elif looks_like_cookie_failure(text):
             reason = (
                 "O YouTube recusou os cookies no yt-dlp. Atualize o arquivo em cookies. "
                 "Os vídeos não serão baixados."
@@ -360,6 +391,17 @@ def _probe(cookiefile: Path) -> None:
         info = ydl.extract_info(_PROBE_URL, download=False)
     if not info or not info.get("id"):
         raise RuntimeError("yt-dlp returned no video")
+
+
+def _page_reload(text: str) -> bool:
+    return "the page needs to be reloaded" in text.lower() or "recarregar a página" in text.lower()
+
+
+def _reload_message() -> str:
+    return (
+        "O YouTube pediu para recarregar a página ao validar os cookies. "
+        "Os vídeos não serão baixados."
+    )
 
 
 def looks_like_cookie_failure(text: str) -> bool:
