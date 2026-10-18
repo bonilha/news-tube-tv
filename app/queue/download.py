@@ -667,6 +667,10 @@ async def _download_keep(keep: list[str], generation: int, normalize: bool = Tru
                 log.info("Download stopped until the queue is shuffled: %s", video_id)
                 return
             text = str(exc)
+            if "the page needs to be reloaded" in text.lower():
+                log.warning("Sessão do YouTube requer interação (reload) para %s. Invalidando cookies.", video_id)
+                yt_cookies.invalidate()
+                continue
             if permanent_download_error(text):
                 log.warning("Download refused for %s: %s", video_id, text.splitlines()[0][:300])
                 await delete_queue_video(video_id)
