@@ -16,6 +16,7 @@ def _reset(monkeypatch, tmp_path):
     yt_cookies._checked_at = 0.0
     yt_cookies._source_mtime = -1.0
     yt_cookies._netscape_path = None
+    yt_cookies._player_client = ""
     monkeypatch.setattr(yt_cookies, "_probe", lambda path: None)
 
 
@@ -148,6 +149,88 @@ def test_reload_error_is_not_called_a_dead_session(monkeypatch, tmp_path):
     assert "recusados" not in message
     assert "falha firefox" in message
     assert "falha edge" in message
+
+
+def test_reload_keeps_the_session_file(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+
+    def _run(args, **kwargs):
+        dest = args[args.index("--cookies") + 1]
+        open(dest, "w", encoding="utf-8").write(_NETSCAPE)
+        completed = type("Completed", (), {})()
+        completed.returncode = 1
+        completed.stderr = "ERROR: [youtube] qvsZpbDnl2E: The page needs to be reloaded."
+        completed.stdout = ""
+        return completed
+
+    monkeypatch.setattr(yt_cookies.subprocess, "run", _run)
+    path = yt_cookies.export_browser_cookies("firefox")
+    assert "LOGIN_INFO" in path.read_text(encoding="utf-8")
+
+
+def test_dpapi_without_a_session_is_still_a_failure(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+
+    def _run(args, **kwargs):
+        completed = type("Completed", (), {})()
+        completed.returncode = 1
+        completed.stderr = "ERROR: Failed to decrypt with DPAPI."
+        completed.stdout = ""
+        return completed
+
+    monkeypatch.setattr(yt_cookies.subprocess, "run", _run)
+    try:
+        yt_cookies.export_browser_cookies("edge")
+    except yt_cookies.BrowserCookiesError as exc:
+        assert "Microsoft Edge" in str(exc)
+    else:
+        raise AssertionError("expected BrowserCookiesError")
+    assert not yt_cookies.cookie_file().is_file()
+
+
+def test_firefox_session_does_not_open_edge(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+    calls = []
+
+    def _export(browser, dest=None):
+        calls.append(browser)
+        yt_cookies.store_netscape(_NETSCAPE)
+        return yt_cookies.cookie_file()
+
+    def _probe(path):
+        raise RuntimeError("ERROR: [youtube] qvsZpbDnl2E: The page needs to be reloaded.")
+
+    monkeypatch.setattr(yt_cookies, "export_browser_cookies", _export)
+    monkeypatch.setattr(yt_cookies, "_probe", _probe)
+    assert yt_cookies.check_cookies() is False
+    assert calls == ["firefox"]
+    assert "Microsoft Edge" not in yt_cookies.status()["message"]
+
+
+def test_probe_accepts_the_second_player_client(monkeypatch, tmp_path):
+    calls = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            self.client = opts["extractor_args"]["youtube"]["player_client"][0]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            calls.append(self.client)
+            if self.client == "tv":
+                raise RuntimeError("The page needs to be reloaded.")
+            return {"id": "qvsZpbDnl2E"}
+
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    yt_cookies._probe(tmp_path / "cookies.txt")
+    assert calls == ["tv", "web_safari"]
+    assert yt_cookies._player_client == "web_safari"
 
 
 def test_edge_button_error_stays_a_page_error(monkeypatch, tmp_path):

@@ -23,6 +23,8 @@ _netscape_path: Path | None = None
 _pending_message = ""
 
 _PROBE_URL = "https://www.youtube.com/watch?v=qvsZpbDnl2E"
+_PLAYER_CLIENTS = ("tv", "web_safari", "mweb")
+_player_client = ""
 _EXPORT_TIMEOUT = 120
 _AUTH_NAMES = frozenset({
     "LOGIN_INFO", "SID", "SAPISID",
@@ -46,6 +48,11 @@ def status() -> dict:
 
 def netscape_path() -> Path | None:
     return _netscape_path if _ok else None
+
+
+def player_client() -> str:
+    """YouTube client that passed the cookie probe. Empty until then."""
+    return _player_client if _ok else ""
 
 
 def mark_rejected(message: str) -> None:
@@ -145,7 +152,10 @@ def export_browser_cookies(browser: str, dest: Path | None = None) -> Path:
             f"Não foi possível ler os cookies do {label}."
         ) from exc
     detail = (completed.stderr or completed.stdout or "").strip()
-    wrote_session = completed.returncode == 0 and dest.is_file() and _has_login(dest)
+    has_login = dest.is_file() and _has_login(dest)
+    # yt-dlp writes the Netscape file before it asks YouTube for the probe
+    # video. A web-client "reload the page" answer is not a dead session.
+    wrote_session = has_login and (completed.returncode == 0 or _page_reload(detail))
     if not wrote_session:
         _restore_cookie_file(dest, previous)
         log.warning("Cookie export from %s failed: %s", browser, detail[:400])
@@ -174,9 +184,9 @@ def export_edge_cookies(dest: Path | None = None) -> Path:
 def check_cookies(*, try_edge: bool = True) -> bool:
     """Convert the cookie file and ask yt-dlp for one video without downloading it.
 
-    A failed file is not the alarm yet. Firefox is exported, the file is read
-    again, then Edge, then the file is read again. ok=false is published only
-    after that last read fails.
+    A failed file is not the alarm yet. Firefox is exported and the file is
+    read again. Edge runs only when Firefox did not write a YouTube session.
+    ok=false is published only after that last read fails.
     """
     if _accept_file(publish=not try_edge):
         return True
@@ -193,6 +203,8 @@ def check_cookies(*, try_edge: bool = True) -> bool:
         if _accept_file(publish=False):
             return True
         notes.append(_pending_message)
+        if browser == "firefox":
+            break
     if _page_reload(_pending_message) or _page_reload(file_note):
         faults = " ".join(note for note in notes if note and not _page_reload(note))
         message = _reload_message()
@@ -213,7 +225,7 @@ def _accept_file(*, publish: bool = True) -> bool:
     publish=False remembers the reason and leaves the public ok flag alone,
     so the cookie alarm does not start in the middle of a browser export.
     """
-    global _ok, _message, _checked_at, _source_mtime, _netscape_path
+    global _ok, _message, _checked_at, _source_mtime, _netscape_path, _player_client
     source = _find_source()
     if source is None:
         return _reject(
@@ -258,7 +270,7 @@ def _accept_file(*, publish: bool = True) -> bool:
         _checked_at = time.time()
         _source_mtime = source.stat().st_mtime
         _netscape_path = netscape
-    log.info("YouTube cookies accepted from %s", source.name)
+    log.info("YouTube cookies accepted from %s via %s", source.name, _player_client)
     return True
 
 
@@ -377,20 +389,38 @@ def _has_login(path: Path) -> bool:
 
 
 def _probe(cookiefile: Path) -> None:
+    """Ask YouTube for one video. The first client that answers is kept.
+
+    The default web client answers "the page needs to be reloaded" when it
+    wants a PO token. tv, web_safari, and mweb are tried in that order.
+    """
+    global _player_client
     import yt_dlp
 
-    opts = {
-        "cookiefile": str(cookiefile),
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-        "extract_flat": False,
-    }
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(_PROBE_URL, download=False)
-    if not info or not info.get("id"):
-        raise RuntimeError("yt-dlp returned no video")
+    errors: list[Exception] = []
+    for client in _PLAYER_CLIENTS:
+        opts = {
+            "cookiefile": str(cookiefile),
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": True,
+            "extract_flat": False,
+            "extractor_args": {"youtube": {"player_client": [client]}},
+        }
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(_PROBE_URL, download=False)
+        except Exception as exc:
+            errors.append(exc)
+            continue
+        if info and info.get("id"):
+            _player_client = client
+            return
+        errors.append(RuntimeError("yt-dlp returned no video"))
+    if errors:
+        raise errors[-1]
+    raise RuntimeError("yt-dlp returned no video")
 
 
 def _page_reload(text: str) -> bool:
