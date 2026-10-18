@@ -23,7 +23,7 @@ _netscape_path: Path | None = None
 _pending_message = ""
 
 _PROBE_URL = "https://www.youtube.com/watch?v=qvsZpbDnl2E"
-_PLAYER_CLIENTS = ("tv", "web_safari", "mweb")
+_PLAYER_CLIENTS = ("android_sdkless", "web_embedded")
 _player_client = ""
 _EXPORT_TIMEOUT = 120
 _AUTH_NAMES = frozenset({
@@ -388,11 +388,36 @@ def _has_login(path: Path) -> bool:
     return bool(names & _AUTH_NAMES)
 
 
-def _probe(cookiefile: Path) -> None:
-    """Ask YouTube for one video. The first client that answers is kept.
+class _SilentLogger:
+    def debug(self, msg):
+        return
 
-    The default web client answers "the page needs to be reloaded" when it
-    wants a PO token. tv, web_safari, and mweb are tried in that order.
+    def info(self, msg):
+        return
+
+    def warning(self, msg):
+        return
+
+    def error(self, msg):
+        return
+
+
+def _has_video(info: dict | None) -> bool:
+    if not info or not info.get("id"):
+        return False
+    for fmt in info.get("formats") or []:
+        vcodec = fmt.get("vcodec")
+        if vcodec and vcodec != "none":
+            return True
+    return False
+
+
+def _probe(cookiefile: Path) -> None:
+    """Ask YouTube for one video. The first client with a picture is kept.
+
+    tv, web and mweb often return an id and no video formats, then yt-dlp
+    says the format is not available. android_sdkless and web_embedded still
+    list AVC1. A client without a picture is skipped.
     """
     global _player_client
     import yt_dlp
@@ -406,6 +431,8 @@ def _probe(cookiefile: Path) -> None:
             "skip_download": True,
             "noplaylist": True,
             "extract_flat": False,
+            "ignore_no_formats_error": True,
+            "logger": _SilentLogger(),
             "extractor_args": {"youtube": {"player_client": [client]}},
         }
         try:
@@ -414,10 +441,10 @@ def _probe(cookiefile: Path) -> None:
         except Exception as exc:
             errors.append(exc)
             continue
-        if info and info.get("id"):
+        if _has_video(info):
             _player_client = client
             return
-        errors.append(RuntimeError("yt-dlp returned no video"))
+        errors.append(RuntimeError(f"{client} returned no video formats"))
     if errors:
         raise errors[-1]
     raise RuntimeError("yt-dlp returned no video")

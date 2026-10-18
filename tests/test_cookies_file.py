@@ -222,15 +222,18 @@ def test_probe_accepts_the_second_player_client(monkeypatch, tmp_path):
 
         def extract_info(self, url, download=False):
             calls.append(self.client)
-            if self.client == "tv":
-                raise RuntimeError("The page needs to be reloaded.")
-            return {"id": "qvsZpbDnl2E"}
+            if self.client == "android_sdkless":
+                return {"id": "qvsZpbDnl2E", "formats": [{"vcodec": "none"}]}
+            return {
+                "id": "qvsZpbDnl2E",
+                "formats": [{"vcodec": "avc1.4D401E", "height": 720}],
+            }
 
     import yt_dlp
     monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
     yt_cookies._probe(tmp_path / "cookies.txt")
-    assert calls == ["tv", "web_safari"]
-    assert yt_cookies._player_client == "web_safari"
+    assert calls == ["android_sdkless", "web_embedded"]
+    assert yt_cookies._player_client == "web_embedded"
 
 
 def test_edge_button_error_stays_a_page_error(monkeypatch, tmp_path):
