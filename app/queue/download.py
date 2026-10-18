@@ -1149,9 +1149,6 @@ def _download_mp4(video_id: str, normalize: bool = False, label: str = "") -> No
     if cookiefile is None:
         raise RuntimeError("YouTube cookies are not valid")
     opts["cookiefile"] = str(cookiefile)
-    client = yt_cookies.player_client()
-    if client:
-        opts["extractor_args"] = {"youtube": {"player_client": [client]}}
 
     def _stop_when_held(_status: dict) -> None:
         if _download_hold > 0 or video_id in _abandoned:

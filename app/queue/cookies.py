@@ -23,8 +23,6 @@ _netscape_path: Path | None = None
 _pending_message = ""
 
 _PROBE_URL = "https://www.youtube.com/watch?v=qvsZpbDnl2E"
-_PLAYER_CLIENTS = ("android_sdkless", "web_embedded")
-_player_client = ""
 _EXPORT_TIMEOUT = 120
 _AUTH_NAMES = frozenset({
     "LOGIN_INFO", "SID", "SAPISID",
@@ -48,11 +46,6 @@ def status() -> dict:
 
 def netscape_path() -> Path | None:
     return _netscape_path if _ok else None
-
-
-def player_client() -> str:
-    """YouTube client that passed the cookie probe. Empty until then."""
-    return _player_client if _ok else ""
 
 
 def mark_rejected(message: str) -> None:
@@ -225,7 +218,7 @@ def _accept_file(*, publish: bool = True) -> bool:
     publish=False remembers the reason and leaves the public ok flag alone,
     so the cookie alarm does not start in the middle of a browser export.
     """
-    global _ok, _message, _checked_at, _source_mtime, _netscape_path, _player_client
+    global _ok, _message, _checked_at, _source_mtime, _netscape_path
     source = _find_source()
     if source is None:
         return _reject(
@@ -258,9 +251,16 @@ def _accept_file(*, publish: bool = True) -> bool:
                 "O YouTube recusou os cookies no yt-dlp. Atualize o arquivo em cookies. "
                 "Os vídeos não serão baixados."
             )
+        elif "no video formats" in text or "não listou vídeo" in text:
+            reason = (
+                "O yt-dlp não listou vídeo no vídeo de teste. "
+                "Reexporte os cookies do Firefox e tente de novo. "
+                "Os vídeos não serão baixados."
+            )
         else:
             reason = (
                 "Não foi possível validar os cookies com o yt-dlp. "
+                "Confira a internet e reexporte os cookies. "
                 "Os vídeos não serão baixados."
             )
         return _reject(reason, publish=publish)
@@ -270,7 +270,7 @@ def _accept_file(*, publish: bool = True) -> bool:
         _checked_at = time.time()
         _source_mtime = source.stat().st_mtime
         _netscape_path = netscape
-    log.info("YouTube cookies accepted from %s via %s", source.name, _player_client)
+    log.info("YouTube cookies accepted from %s", source.name)
     return True
 
 
@@ -388,20 +388,6 @@ def _has_login(path: Path) -> bool:
     return bool(names & _AUTH_NAMES)
 
 
-class _SilentLogger:
-    def debug(self, msg):
-        return
-
-    def info(self, msg):
-        return
-
-    def warning(self, msg):
-        return
-
-    def error(self, msg):
-        return
-
-
 def _has_video(info: dict | None) -> bool:
     if not info or not info.get("id"):
         return False
@@ -413,41 +399,29 @@ def _has_video(info: dict | None) -> bool:
 
 
 def _probe(cookiefile: Path) -> None:
-    """Ask YouTube for one video. The first client with a picture is kept.
+    """Ask YouTube for one video with yt-dlp's own client list.
 
-    tv, web and mweb often return an id and no video formats, then yt-dlp
-    says the format is not available. android_sdkless and web_embedded still
-    list AVC1. A client without a picture is skipped.
+    Pinning a client name breaks with every yt-dlp release: names appear and
+    disappear, and a variant can answer with an id and no video formats. The
+    manual `yt-dlp --cookies-from-browser firefox --cookies FILE URL` uses the
+    default list, so the probe does too. A client without a picture is not a
+    dead cookie; the caller reports it as such only when no format comes back.
     """
-    global _player_client
     import yt_dlp
 
-    errors: list[Exception] = []
-    for client in _PLAYER_CLIENTS:
-        opts = {
-            "cookiefile": str(cookiefile),
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            "noplaylist": True,
-            "extract_flat": False,
-            "ignore_no_formats_error": True,
-            "logger": _SilentLogger(),
-            "extractor_args": {"youtube": {"player_client": [client]}},
-        }
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(_PROBE_URL, download=False)
-        except Exception as exc:
-            errors.append(exc)
-            continue
-        if _has_video(info):
-            _player_client = client
-            return
-        errors.append(RuntimeError(f"{client} returned no video formats"))
-    if errors:
-        raise errors[-1]
-    raise RuntimeError("yt-dlp returned no video")
+    opts = {
+        "cookiefile": str(cookiefile),
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        "noplaylist": True,
+        "extract_flat": False,
+        "extractor_args": {"youtube": {"player_client": ["default"]}},
+    }
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(_PROBE_URL, download=False)
+    if not _has_video(info):
+        raise RuntimeError("yt-dlp não listou vídeo no vídeo de teste")
 
 
 def _page_reload(text: str) -> bool:

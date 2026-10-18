@@ -16,7 +16,6 @@ def _reset(monkeypatch, tmp_path):
     yt_cookies._checked_at = 0.0
     yt_cookies._source_mtime = -1.0
     yt_cookies._netscape_path = None
-    yt_cookies._player_client = ""
     monkeypatch.setattr(yt_cookies, "_probe", lambda path: None)
 
 
@@ -207,12 +206,13 @@ def test_firefox_session_does_not_open_edge(monkeypatch, tmp_path):
     assert "Microsoft Edge" not in yt_cookies.status()["message"]
 
 
-def test_probe_accepts_the_second_player_client(monkeypatch, tmp_path):
-    calls = []
+def test_probe_lets_yt_dlp_pick_the_client(monkeypatch, tmp_path):
+    """Pinning a client name breaks between yt-dlp releases. The probe does not."""
+    seen = []
 
     class FakeYDL:
         def __init__(self, opts):
-            self.client = opts["extractor_args"]["youtube"]["player_client"][0]
+            seen.append(opts)
 
         def __enter__(self):
             return self
@@ -221,9 +221,6 @@ def test_probe_accepts_the_second_player_client(monkeypatch, tmp_path):
             return False
 
         def extract_info(self, url, download=False):
-            calls.append(self.client)
-            if self.client == "android_sdkless":
-                return {"id": "qvsZpbDnl2E", "formats": [{"vcodec": "none"}]}
             return {
                 "id": "qvsZpbDnl2E",
                 "formats": [{"vcodec": "avc1.4D401E", "height": 720}],
@@ -232,8 +229,76 @@ def test_probe_accepts_the_second_player_client(monkeypatch, tmp_path):
     import yt_dlp
     monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
     yt_cookies._probe(tmp_path / "cookies.txt")
-    assert calls == ["android_sdkless", "web_embedded"]
-    assert yt_cookies._player_client == "web_embedded"
+    assert len(seen) == 1
+    assert seen[0]["extractor_args"]["youtube"]["player_client"] == ["default"]
+
+
+def test_probe_without_any_video_is_an_error(monkeypatch, tmp_path):
+    class FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def extract_info(self, url, download=False):
+            return {"id": "qvsZpbDnl2E", "formats": [{"vcodec": "none"}]}
+
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    try:
+        yt_cookies._probe(tmp_path / "cookies.txt")
+    except RuntimeError as exc:
+        assert "não listou vídeo" in str(exc)
+    else:
+        raise AssertionError("expected RuntimeError")
+
+
+def test_no_video_is_not_reported_as_rejected_cookies(monkeypatch, tmp_path):
+    _reset(monkeypatch, tmp_path)
+    yt_cookies.store_netscape(_NETSCAPE)
+
+    def _probe(path):
+        raise RuntimeError("yt-dlp não listou vídeo no vídeo de teste")
+
+    monkeypatch.setattr(yt_cookies, "_probe", _probe)
+    assert yt_cookies.check_cookies(try_edge=False) is False
+    message = yt_cookies.status()["message"]
+    assert "não listou vídeo" in message
+    assert "recusou os cookies" not in message
+
+
+def test_downloads_do_not_pin_a_player_client(monkeypatch, tmp_path):
+    """The download must use the same client list as the probe."""
+    from app.config import settings
+    from app.queue import download as queue_download
+
+    seen = []
+
+    class FakeYDL:
+        def __init__(self, opts):
+            seen.append(opts)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def download(self, urls):
+            return 0
+
+    import yt_dlp
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", FakeYDL)
+    monkeypatch.setattr(settings, "VIDEOS_DIR", tmp_path)
+    yt_cookies._ok = True
+    yt_cookies._netscape_path = tmp_path / "cookies.txt"
+    monkeypatch.setattr(queue_download, "_place_in_queue", lambda *a, **k: None)
+    queue_download._download_mp4("qvsZpbDnl2E")
+    assert "extractor_args" not in seen[0]
 
 
 def test_edge_button_error_stays_a_page_error(monkeypatch, tmp_path):
