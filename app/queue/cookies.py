@@ -18,6 +18,7 @@ _message = "Cookies do YouTube ainda não foram verificados."
 _checked_at = 0.0
 _source_mtime = -1.0
 _netscape_path: Path | None = None
+_pending_message = ""
 
 _PROBE_URL = "https://www.youtube.com/watch?v=jNQXAC9IVRw"
 _AUTH_NAMES = frozenset({
@@ -52,6 +53,14 @@ def mark_rejected(message: str) -> None:
     log.error("YouTube cookies rejected: %s", message)
 
 
+def _reject(message: str, *, publish: bool) -> bool:
+    global _pending_message
+    _pending_message = message
+    if publish:
+        mark_rejected(message)
+    return False
+
+
 def invalidate() -> None:
     """Drop the cached verdict so the next sync re-runs the probe.
 
@@ -62,7 +71,11 @@ def invalidate() -> None:
     _checked_at = 0.0
 
 
-class EdgeCookiesError(Exception):
+class BrowserCookiesError(Exception):
+    """The browser cookie database could not be exported. Not the alarm by itself."""
+
+
+class EdgeCookiesError(BrowserCookiesError):
     """Edge has no readable YouTube session. The page shows this; it is not the alarm."""
 
 
@@ -83,100 +96,131 @@ def store_netscape(text: str) -> None:
     invalidate()
 
 
-def export_edge_cookies(dest: Path | None = None) -> Path:
-    """Read the Default Edge profile and store a Netscape file."""
+def export_browser_cookies(browser: str, dest: Path | None = None) -> Path:
+    """Load a browser profile the way `--cookies-from-browser` does and dump a Netscape file.
+
+    The file is written only when the jar has a YouTube session. A locked database
+    or a browser with no session leaves the current file in place.
+    """
     dest = dest or cookie_file()
+    label = "Firefox" if browser == "firefox" else "Microsoft Edge"
     try:
-        from yt_dlp.cookies import extract_cookies_from_browser
-        jar = extract_cookies_from_browser("edge", "Default")
+        import yt_dlp
+        from yt_dlp.cookies import CookieLoadError
+        opts = {
+            "cookiesfrombrowser": (browser, None, None, None),
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            try:
+                jar = ydl.cookiejar
+            except CookieLoadError as exc:
+                raise BrowserCookiesError(
+                    f"Não foi possível ler os cookies do {label}."
+                ) from exc
+            names = {cookie.name for cookie in jar}
+            if not (names & _AUTH_NAMES):
+                raise BrowserCookiesError(
+                    f"O {label} não tem sessão do YouTube. "
+                    "Entre no YouTube nesse navegador e tente de novo."
+                )
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            jar.save(str(dest))
+    except BrowserCookiesError:
+        raise
     except Exception as exc:
-        raise EdgeCookiesError(
-            "Não foi possível ler os cookies do Microsoft Edge."
+        log.warning("Cookie export from %s failed: %s", browser, exc)
+        raise BrowserCookiesError(
+            f"Não foi possível ler os cookies do {label}."
         ) from exc
-    lines = ["# Netscape HTTP Cookie File", ""]
-    names: set[str] = set()
-    for cookie in jar:
-        domain = cookie.domain or ""
-        if "youtube.com" not in domain and "google.com" not in domain:
-            continue
-        include_sub = "TRUE" if domain.startswith(".") else "FALSE"
-        secure = "TRUE" if cookie.secure else "FALSE"
-        expires = str(int(cookie.expires or 0))
-        prefix = "#HttpOnly_" if cookie.has_nonstandard_attr("HttpOnly") else ""
-        lines.append("\t".join((
-            f"{prefix}{domain}", include_sub, cookie.path or "/",
-            secure, expires, cookie.name, cookie.value or "",
-        )))
-        names.add(cookie.name)
-    if not (names & _AUTH_NAMES):
-        raise EdgeCookiesError(
-            "O Edge não tem sessão do YouTube. Entre no YouTube nesse navegador e tente de novo."
-        )
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    dest.write_text("\n".join(lines) + "\n", encoding="utf-8")
     invalidate()
     return dest
+
+
+def export_edge_cookies(dest: Path | None = None) -> Path:
+    """Read Edge and store a Netscape file. Page errors stay EdgeCookiesError."""
+    try:
+        return export_browser_cookies("edge", dest)
+    except BrowserCookiesError as exc:
+        if isinstance(exc, EdgeCookiesError):
+            raise
+        raise EdgeCookiesError(str(exc)) from exc
 
 
 def check_cookies(*, try_edge: bool = True) -> bool:
     """Convert the cookie file and ask yt-dlp for one video without downloading it.
 
-    One failed check reads Edge once and checks again. The alarm stays off until
-    that second check also fails.
+    A failed file is not the alarm yet. Firefox is exported, the file is read
+    again, then Edge, then the file is read again. ok=false is published only
+    after that last read fails.
     """
-    if _accept_file():
+    if _accept_file(publish=not try_edge):
         return True
     if not try_edge:
         return False
-    first = _message
-    try:
-        export_edge_cookies()
-    except EdgeCookiesError as exc:
-        mark_rejected(f"{first} Leitura automática do Edge também falhou: {exc}")
-        return False
-    if _accept_file():
-        return True
+    notes: list[str] = []
+    file_note = _pending_message
+    for browser in ("firefox", "edge"):
+        try:
+            export_browser_cookies(browser)
+        except BrowserCookiesError as exc:
+            notes.append(str(exc))
+            continue
+        if _accept_file(publish=False):
+            return True
+        notes.append(_pending_message)
+    detail = " ".join(part for part in (file_note, *notes) if part)
     mark_rejected(
-        f"{_message} Os cookies lidos do Edge também foram recusados."
+        f"{detail} Os cookies lidos do Firefox e do Edge também foram recusados."
     )
     return False
 
 
-def _accept_file() -> bool:
-    """Validate the file on disk. Does not call Edge."""
+def _accept_file(*, publish: bool = True) -> bool:
+    """Validate the file on disk. Does not open a browser.
+
+    publish=False remembers the reason and leaves the public ok flag alone,
+    so the cookie alarm does not start in the middle of a browser export.
+    """
     global _ok, _message, _checked_at, _source_mtime, _netscape_path
     source = _find_source()
     if source is None:
-        mark_rejected("Nenhum arquivo de cookies em cookies/. Os vídeos não serão baixados.")
-        return False
+        return _reject(
+            "Nenhum arquivo de cookies em cookies/. Os vídeos não serão baixados.",
+            publish=publish,
+        )
     try:
         netscape = _to_netscape(source)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
-        mark_rejected(f"Arquivo de cookies ilegível ({source.name}). Os vídeos não serão baixados.")
         log.info("Cookie file unreadable: %s", exc)
-        return False
-    if not _has_login(netscape):
-        mark_rejected(
-            "Os cookies não têm sessão do YouTube. Exporte de novo a pasta cookies. "
-            "Os vídeos não serão baixados."
+        return _reject(
+            f"Arquivo de cookies ilegível ({source.name}). Os vídeos não serão baixados.",
+            publish=publish,
         )
-        return False
+    if not _has_login(netscape):
+        return _reject(
+            "Os cookies não têm sessão do YouTube. Exporte de novo a pasta cookies. "
+            "Os vídeos não serão baixados.",
+            publish=publish,
+        )
     try:
         _probe(netscape)
     except Exception as exc:
         text = str(exc)
+        log.warning("Cookie probe failed: %s", text[:400])
         if looks_like_cookie_failure(text):
-            mark_rejected(
+            reason = (
                 "O YouTube recusou os cookies no yt-dlp. Atualize o arquivo em cookies. "
                 "Os vídeos não serão baixados."
             )
         else:
-            mark_rejected(
+            reason = (
                 "Não foi possível validar os cookies com o yt-dlp. "
                 "Os vídeos não serão baixados."
             )
-        log.warning("Cookie probe failed: %s", text[:400])
-        return False
+        return _reject(reason, publish=publish)
     with _LOCK:
         _ok = True
         _message = ""
