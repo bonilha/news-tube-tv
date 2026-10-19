@@ -104,3 +104,23 @@ def test_low_group_opens_the_boundary_without_entering_the_tall_group():
 def test_tail_short_swaps_with_the_nearest_normal_behind():
     channel = {1: 10, 2: 11, 3: 12}
     assert settle_tail_short([1, 2, 3], {2, 3}, channel) == [2, 1, 3]
+
+
+def test_fallback_to_next_encoder(monkeypatch):
+    from app.queue.download import fallback_to_next_encoder, selected_encoder
+    import app.queue.download as qd
+
+    # Simular lista de codificadores
+    test_encoders = (
+        ("h264_bad", "Bad HW H.264", (("-cq", "23"),)),
+        ("libx264", "CPU H.264", (("-preset", "veryfast", "-crf", "23"),)),
+    )
+    monkeypatch.setattr(qd, "_ENCODERS", test_encoders)
+    monkeypatch.setattr(qd, "_encoder", "h264_bad")
+    monkeypatch.setattr(qd, "_encoder_label", "Bad HW H.264")
+
+    # Quando h264_bad falha, deve pular para o próximo encoder funcional (libx264)
+    next_enc = fallback_to_next_encoder("h264_bad")
+    assert next_enc == "libx264"
+    assert selected_encoder() == "libx264"
+

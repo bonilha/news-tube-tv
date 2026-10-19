@@ -229,6 +229,28 @@ def probe_encoders() -> str | None:
     return None
 
 
+def fallback_to_next_encoder(failed_encoder: str) -> str | None:
+    """When the active hardware encoder fails during a real job, fall back to the next working one."""
+    global _encoder, _encoder_args, _encoder_label
+    log.warning("Encodificador %s falhou em execução. Buscando fallback...", failed_encoder)
+    found_failed = False
+    for name, label, arg_sets in _ENCODERS:
+        if not found_failed:
+            if name == failed_encoder:
+                found_failed = True
+            continue
+        for args in arg_sets:
+            if _encoder_works(name, args):
+                _encoder = name
+                _encoder_args = args
+                _encoder_label = label
+                log.warning("Novo codificador selecionado por fallback: %s (%s)", label, name)
+                say(f"Codificador alterado para: {label}")
+                return name
+    log.error("Nenhum codificador de fallback disponível após falha de %s", failed_encoder)
+    return None
+
+
 def _encoder_works(name: str, args: tuple[str, ...]) -> bool:
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
@@ -779,7 +801,7 @@ def portrait_fill_filter() -> str:
         f"crop={blur_w}:{blur_h},gblur=sigma=8,eq=brightness=-0.2,"
         f"scale={width}:{height}:flags=bilinear,format=yuv420p[blurred];"
         f"[fg]scale=-2:{height}:flags=lanczos,format=yuv420p[fgv];"
-        "[blurred][fgv]overlay=(W-w)/2:(H-h)/2,setsar=1[v]"
+        "[blurred][fgv]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[v]"
     )
 
 
@@ -1095,7 +1117,33 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
     temp = downloads_dir() / f"{video_id}.encode.mp4"
     if temp.exists():
         temp.unlink()
-    _run_ffmpeg(source, temp, action)
+    try:
+        _run_ffmpeg(source, temp, action)
+    except RuntimeError as exc:
+        active_enc = _encoder
+        if active_enc and "-c:v" in action and active_enc in action:
+            next_enc = fallback_to_next_encoder(active_enc)
+            if next_enc:
+                log.warning("Retentando ffmpeg para %s com codificador de fallback: %s", video_id, next_enc)
+                fallback_action = placement_action(
+                    video_codec=video_codec,
+                    audio_codec=audio_codec,
+                    suffix=source.suffix,
+                    needs_scale=needs_scale,
+                    normalize=normalize,
+                    measured=measured,
+                    encoder=_encoder or "",
+                    encoder_args=_encoder_args,
+                    scale_filter=portrait_fill_filter() if portrait else _scale_filter(),
+                    portrait=portrait,
+                )
+                if temp.exists():
+                    temp.unlink()
+                _run_ffmpeg(source, temp, fallback_action)
+            else:
+                raise
+        else:
+            raise
     temp.replace(final)
     if source.exists() and source.resolve() != final.resolve():
         source.unlink()
