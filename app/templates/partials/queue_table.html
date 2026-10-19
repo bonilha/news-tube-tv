@@ -1,67 +1,72 @@
 {% if scan_stats is defined and scan_stats %}
-<div class="card mb-2" style="border-color:{% if scan_stats.error %}var(--danger-color){% else %}var(--success-color){% endif %}">
+<div class="card mb-2" style="border-color:{% if scan_stats.error %}var(--danger-color){% else %}var(--success-color){% endif %}; background:{% if scan_stats.error %}rgba(239,68,68,0.1){% else %}rgba(16,185,129,0.1){% endif %};">
     {% if scan_stats.error %}
-    <span style="color:var(--danger-color)">{{ scan_stats.error }}</span>
+    <span style="color:var(--danger-color); font-weight:600;">{{ scan_stats.error }}</span>
     {% else %}
     {% set ns = namespace(bits=[]) %}
     {% if scan_stats.skipped_duration %}{% set ns.bits = ns.bits + [scan_stats.skipped_duration ~ ' com mais de ' ~ (max_duration_minutes|default(30)) ~ ' min'] %}{% endif %}
     {% if scan_stats.skipped_shorts %}{% set ns.bits = ns.bits + [scan_stats.skipped_shorts ~ ' shorts desativados no canal'] %}{% endif %}
     {% if scan_stats.skipped_age %}{% set ns.bits = ns.bits + [scan_stats.skipped_age ~ ' fora da janela de idade'] %}{% endif %}
     {% if scan_stats.skipped_members %}{% set ns.bits = ns.bits + [scan_stats.skipped_members ~ ' exclusivos para membros'] %}{% endif %}
-    <span style="color:var(--success-color)">✓ Scan concluído: {{ scan_stats.added }} adicionado(s), {{ scan_stats.skipped }} ignorado(s), {{ scan_stats.errors }} erro(s){% if ns.bits %} ({{ ns.bits | join(', ') }}){% endif %}{% if scan_stats.cleared is defined %} · {{ scan_stats.cleared }} removidos da fila{% endif %}</span>
+    <span style="color:var(--success-color); font-weight:600;">✓ Varredura concluída: {{ scan_stats.added }} adicionado(s), {{ scan_stats.skipped }} ignorado(s), {{ scan_stats.errors }} erro(s){% if ns.bits %} ({{ ns.bits | join(', ') }}){% endif %}{% if scan_stats.cleared is defined %} · {{ scan_stats.cleared }} removidos da fila{% endif %}</span>
     {% endif %}
 </div>
 {% endif %}
 
 {% if expired_count is defined and expired_count %}
-<div class="card mb-2" style="border-color:var(--text-muted)">
+<div class="card mb-2" style="border-color:var(--border-color); background:rgba(255,255,255,0.02);">
     <span class="text-muted">⏰ {{ expired_count }} vídeo(s) com mais de 24h removido(s) da fila</span>
 </div>
 {% endif %}
 
-<p class="mb-2"><strong>{{ items|length if items else 0 }} vídeo(s) na fila</strong></p>
+<div class="flex flex-between flex-center mb-2">
+    <p style="margin:0;"><strong>{{ items|length if items else 0 }} vídeo(s) na fila</strong></p>
+</div>
 
 {% if items %}
+<div class="card" style="padding:0; overflow:hidden;">
 <table>
     <thead>
         <tr>
-            <th>#</th>
-            <th>Título</th>
+            <th style="width:40px;">#</th>
+            <th>Título do Vídeo</th>
             <th>Canal</th>
             <th>Duração</th>
-            <th>Tipo</th>
-            <th>Publicado</th>
+            <th>Formato</th>
+            <th>Publicação</th>
             <th>Status</th>
             <th>Arquivo</th>
-            <th>Ações</th>
+            <th style="text-align:right;">Ações</th>
         </tr>
     </thead>
     <tbody>
         {% for item in items %}
         <tr>
-            <td class="text-muted text-sm">{{ loop.index }}</td>
+            <td class="text-muted text-sm" style="font-weight:600;">{{ loop.index }}</td>
             <td>
                 <div class="flex flex-center gap-1">
                     {% if item.thumb %}
-                    <img src="{{ item.thumb }}" alt="" style="width:80px; height:45px; object-fit:cover; border-radius:0.25rem;">
+                    <img src="{{ item.thumb }}" alt="" style="width:80px; height:45px; object-fit:cover; border-radius:0.375rem; border:1px solid var(--border-color);">
                     {% endif %}
                     <div>
                         <a href="https://youtube.com/watch?v={{ item.video_id }}" target="_blank"
-                           style="color:var(--accent-color); text-decoration:none;">
-                            {{ item.title[:60] }}{% if item.title|length > 60 %}…{% endif %}
+                           style="color:var(--text-color); font-weight:500; text-decoration:none;"
+                           onmouseover="this.style.color='var(--accent-color)'"
+                           onmouseout="this.style.color='var(--text-color)'">
+                            {{ item.title[:65] }}{% if item.title|length > 65 %}…{% endif %}
                         </a>
                     </div>
                 </div>
             </td>
             <td class="text-muted text-sm">{{ item.channel_name }}</td>
-            <td class="text-sm">
+            <td class="text-sm font-mono">
                 {% set h = (item.duration // 3600) %}
                 {% set m = ((item.duration % 3600) // 60) %}
                 {% set s = (item.duration % 60) %}
                 {% if h %}{{ h }}:{% endif %}{{ '%02d'|format(m) }}:{{ '%02d'|format(s) }}
             </td>
             <td class="text-sm">
-                {% if item.is_short %}Short{% else %}Normal{% endif %}
+                {% if item.is_short %}<span class="status-badge" style="background:#7c3aed; color:#fff;">Short</span>{% else %}<span class="text-muted">Padrão</span>{% endif %}
             </td>
             <td class="text-muted text-sm">
                 {% if item.published_unix %}
@@ -72,7 +77,7 @@
             </td>
             <td>
                 {% if item.video_id == on_air %}
-                    <span class="status-badge status-on">NO AR</span>
+                    <span class="status-badge status-on pulse">NO AR</span>
                 {% elif item.video_id in aired %}
                     <span class="status-badge" style="background:#1e40af; color:#fff;">TRANSMITIDO ({{ item.play_count }})</span>
                 {% elif item.play_count > 0 %}
@@ -85,15 +90,15 @@
             </td>
             <td class="text-sm">
                 {% if item.local_path %}
-                    <span class="status-badge status-on">MP4</span>
+                    <span class="status-badge status-on" title="Arquivo MP4 pronto localmente">MP4</span>
                 {% elif item.download_error %}
-                    <span class="status-badge status-off" title="{{ item.download_error }}" style="cursor:help;">ERRO</span>
+                    <span class="status-badge" style="background:var(--danger-color); color:#fff; cursor:help;" title="{{ item.download_error }}">ERRO</span>
                 {% else %}
                     <span class="text-muted">—</span>
                 {% endif %}
             </td>
-            <td>
-                <div class="flex gap-1">
+            <td style="text-align:right;">
+                <div class="flex gap-1" style="justify-content:flex-end;">
                     {% if item.download_error %}
                     <button class="btn btn-ghost" style="padding:0.25rem 0.5rem; font-size:0.75rem;" title="Tentar baixar novamente"
                             hx-post="/queue/{{ item.id }}/retry" hx-target="#queue-table" hx-swap="innerHTML">
@@ -101,20 +106,20 @@
                     </button>
                     {% endif %}
                     {% if item.status == 'pending' %}
-                    <button class="btn btn-success" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
+                    <button class="btn btn-success" style="padding:0.25rem 0.5rem; font-size:0.75rem;" title="Iniciar reprodução agora"
                             hx-post="/queue/{{ item.id }}/status/playing" hx-target="#queue-table" hx-swap="innerHTML">
-                        ▶ Play
+                        ▶ Tocar
                     </button>
                     {% endif %}
                     {% if item.status == 'playing' %}
-                    <button class="btn btn-primary" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
+                    <button class="btn btn-primary" style="padding:0.25rem 0.5rem; font-size:0.75rem;" title="Marcar como concluído"
                             hx-post="/queue/{{ item.id }}/status/played" hx-target="#queue-table" hx-swap="innerHTML">
                         ✓ Concluído
                     </button>
                     {% endif %}
-                    <button class="btn btn-danger" style="padding:0.25rem 0.5rem; font-size:0.75rem;"
+                    <button class="btn btn-danger" style="padding:0.25rem 0.5rem; font-size:0.75rem;" title="Remover da fila"
                             hx-delete="/queue/{{ item.id }}" hx-target="#queue-table" hx-swap="innerHTML"
-                            hx-confirm="Remover da fila?">
+                            hx-confirm="Remover {{ item.title }} da fila?">
                         ✕
                     </button>
                 </div>
@@ -123,6 +128,13 @@
         {% endfor %}
     </tbody>
 </table>
+</div>
 {% else %}
-<p class="text-muted">A fila está vazia. Use "Escanear canais" para preenchê-la.</p>
+<div class="card" style="text-align:center; padding:3rem 1.5rem;">
+    <p class="text-muted" style="margin:0 0 1rem 0;">A fila de reprodução está vazia no momento.</p>
+    <button class="btn btn-primary"
+            hx-post="/queue/scan" hx-target="#queue-table" hx-swap="innerHTML">
+        ↻ Escanear canais agora
+    </button>
+</div>
 {% endif %}

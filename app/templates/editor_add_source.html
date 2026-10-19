@@ -1,5 +1,5 @@
 {% if assets %}
-<p class="text-sm text-muted mb-1">Assets from database:</p>
+<p class="text-sm text-muted mb-1">Mídias e assets disponíveis:</p>
 {% for asset in assets %}
 <div class="source-item" onclick="addAsset({{ asset.id }})" style="cursor:pointer">
     <span class="name" title="{{ asset.original_name }}">{{ asset.original_name }}</span>
@@ -9,7 +9,7 @@
 {% endif %}
 
 {% if obs_inputs %}
-<p class="text-sm text-muted mb-1" {% if assets %}style="margin-top:0.5rem"{% endif %}>OBS inputs (existing):</p>
+<p class="text-sm text-muted mb-1" {% if assets %}style="margin-top:0.5rem"{% endif %}>Fontes já existentes no OBS:</p>
 {% for input in obs_inputs %}
 <div class="source-item" onclick="addObsInput('{{ input.inputName }}')" style="cursor:pointer">
     <span class="name" title="{{ input.inputName }}">{{ input.inputName }}</span>
@@ -19,7 +19,7 @@
 {% endif %}
 
 {% if not assets and not obs_inputs %}
-<p class="text-sm text-muted">No more sources to add.</p>
+<p class="text-sm text-muted">Não há mais fontes ou assets para adicionar nesta cena.</p>
 {% endif %}
 
-<button class="btn btn-ghost text-sm mt-1" onclick="document.getElementById('add-source-dropdown').style.display='none'" style="width:100%">Cancel</button>
+<button class="btn btn-ghost text-sm mt-1" onclick="document.getElementById('add-source-dropdown').style.display='none'" style="width:100%">Cancelar</button>

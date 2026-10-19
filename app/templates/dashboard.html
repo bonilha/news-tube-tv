@@ -1,13 +1,21 @@
 {% if not htmx %}{% extends "base.html" %}{% endif %}
 {% block content %}
-<h1 class="mb-2">Channel Control</h1>
-
-<div id="dash-live" hx-get="/dashboard/live" hx-trigger="load, every 3s" hx-swap="innerHTML">
-    <p class="text-muted">Checking OBS...</p>
+<div class="flex flex-between flex-center mb-2">
+    <h1 style="margin:0">Controle de Transmissão</h1>
 </div>
 
-<h2 class="mb-1">Scenes</h2>
+<div id="dash-live" hx-get="/dashboard/live" hx-trigger="load, every 3s" hx-swap="innerHTML">
+    <div class="card flex flex-center gap-1">
+        <span class="spinner"></span>
+        <span class="text-muted">Conectando ao OBS...</span>
+    </div>
+</div>
+
+<h2 class="mb-2" style="margin-top:1.5rem">Cenas do OBS</h2>
 <div id="scene-list" hx-get="/scenes" hx-trigger="load">
-    Loading scenes...
+    <div class="card flex flex-center gap-1">
+        <span class="spinner"></span>
+        <span class="text-muted">Carregando cenas...</span>
+    </div>
 </div>
 {% endblock %}

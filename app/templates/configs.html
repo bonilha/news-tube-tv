@@ -1,14 +1,21 @@
 {% if not htmx %}{% extends "base.html" %}{% endif %}
 {% block content %}
-<h1 class="mb-2">Configs</h1>
+<h1 class="mb-2">Configurações Gerais</h1>
+<p class="text-muted text-sm mb-3">Definições de transmissão RTMP, autenticação do YouTube, normalização de áudio e agendamento automático.</p>
 
 {% if saved %}
-<div class="card mb-2">Salvo. O OBS recebe isso no próximo início de transmissão.</div>
+<div class="card mb-3" style="border-color:var(--success-color); background:rgba(16,185,129,0.1); color:var(--success-color); font-weight:600;">
+    ✓ Configurações salvas com sucesso. O OBS aplicará essas credenciais na próxima transmissão.
+</div>
 {% endif %}
 {% if services_missing %}
-<div class="card mb-2">O services.json indicado não foi encontrado. O modo custom continua disponível.</div>
+<div class="card mb-3" style="border-color:var(--warning-color); background:rgba(245,158,11,0.1); color:var(--warning-color);">
+    ⚠ O arquivo services.json indicado não foi encontrado. O modo customizado de RTMP continua disponível.
+</div>
 {% elif not services %}
-<div class="card mb-2">Nenhum services.json do OBS foi encontrado. Indique o arquivo abaixo ou use o modo custom.</div>
+<div class="card mb-3" style="border-color:var(--warning-color); background:rgba(245,158,11,0.1); color:var(--warning-color);">
+    ℹ Nenhum services.json do OBS foi localizado automaticamente. Indique o caminho do arquivo abaixo ou selecione a opção Customizada.
+</div>
 {% endif %}
 
 <form method="post" action="/configs" hx-post="/configs" hx-target="#content" hx-swap="innerHTML" class="card">

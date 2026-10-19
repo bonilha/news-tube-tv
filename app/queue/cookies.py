@@ -244,7 +244,9 @@ def _accept_file(*, publish: bool = True) -> bool:
     except Exception as exc:
         text = str(exc)
         log.warning("Cookie probe failed: %s", text[:400])
-        if looks_like_cookie_failure(text):
+        if _page_reload(text):
+            reason = _reload_message()
+        elif looks_like_cookie_failure(text):
             reason = (
                 "O YouTube recusou os cookies no yt-dlp. Atualize o arquivo em cookies. "
                 "Os vídeos não serão baixados."

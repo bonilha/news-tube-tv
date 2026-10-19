@@ -1,7 +1,9 @@
-<div class="flex gap-1 mb-3">
+<div class="flex gap-1 mb-3" style="flex-wrap:wrap;">
     <button class="btn btn-success" hx-post="/api/streaming/start" hx-swap="none"
+            hx-indicator="#stream-start-spinner"
             hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')"
             {% if not queue_ready %}disabled title="Ainda não há um MP4 na fila para tocar."{% endif %}>
+        <span id="stream-start-spinner" class="spinner htmx-indicator"></span>
         Transmissão ao vivo
     </button>
     <button class="btn btn-danger" hx-post="/api/streaming/stop" hx-swap="none"
@@ -9,12 +11,12 @@
             {% if not queue_ready and not status.is_streaming %}disabled title="Ainda não há um MP4 na fila para tocar."{% endif %}>
         Parar transmissão
     </button>
-    <button class="btn btn-success" hx-post="/api/cycle/enable" hx-swap="none"
+    <button class="btn btn-ghost" hx-post="/api/cycle/enable" hx-swap="none"
             hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')"
             {% if not queue_ready %}disabled title="Ainda não há um MP4 na fila para tocar."{% endif %}>
-        Simulação
+        Iniciar simulação (preview)
     </button>
-    <button class="btn btn-danger" hx-post="/api/cycle/disable" hx-swap="none"
+    <button class="btn btn-ghost" hx-post="/api/cycle/disable" hx-swap="none"
             hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')"
             {% if not queue_ready and not cycle.enabled %}disabled title="Ainda não há um MP4 na fila para tocar."{% endif %}>
         Parar simulação
@@ -26,17 +28,21 @@
     </button>
 </div>
 {% if cycle.finish_requested %}
-<p class="text-sm mb-2">Encerramento pedido: o vídeo atual termina, a vinheta toca e a transmissão para.</p>
+<div class="card mb-3" style="border-color:var(--warning-color); background:rgba(245, 158, 11, 0.1);">
+    <span style="color:var(--warning-color); font-weight:600;">⏳ Encerramento solicitado:</span>
+    <span class="text-sm"> o vídeo atual terminará, a vinheta tocará e a transmissão será finalizada automaticamente.</span>
+</div>
 {% endif %}
 
 <div class="card mb-3">
     <h3>Duração da transmissão</h3>
-    <p class="text-sm mb-2">No ar nesta transmissão: <strong>{{ elapsed_label }}</strong>{% if limit_seconds %} de <strong>{{ limit_label }}</strong>. Conta vídeo e vinheta. Ao atingir o limite, o vídeo atual termina, a vinheta toca e a transmissão para.{% else %} — <strong>contínuo</strong>. Não há limite: a transmissão segue até você mandar parar.{% endif %}</p>
+    <p class="text-sm mb-2">No ar nesta transmissão: <strong>{{ elapsed_label }}</strong>{% if limit_seconds %} de <strong>{{ limit_label }}</strong>. Conta vídeo e vinheta. Ao atingir o limite, o vídeo atual termina, a vinheta toca e a transmissão encerra.{% else %} — <strong>contínuo</strong>. Não há limite programado: a transmissão segue até você mandar parar.{% endif %}</p>
     <form class="flex flex-center gap-1" hx-post="/api/broadcast/limit" hx-swap="none"
           hx-trigger="change, submit"
-          hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">
-        <label class="text-sm text-muted" for="limit-seconds">Duração</label>
-        <select id="limit-seconds" name="seconds" style="width:160px; padding:0.3rem;">
+          hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')"
+          style="flex-wrap:wrap;">
+        <label class="text-sm text-muted" for="limit-seconds">Limite:</label>
+        <select id="limit-seconds" name="seconds" style="padding:0.4rem 0.6rem; border-radius:0.375rem; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color);">
             {% for value, label in limit_options %}
             <option value="{{ value }}" {% if value == limit_seconds %}selected{% endif %}>{{ label }}</option>
             {% endfor %}
@@ -45,65 +51,71 @@
     </form>
 </div>
 {% if not queue_ready %}
-<p class="text-sm text-muted mb-2">Ao vivo e simulação ficam bloqueados até haver um MP4 na fila. Parar continua disponível se essa transmissão ou simulação já estiver ligada.</p>
+<p class="text-sm text-muted mb-2">⚠ A transmissão ao vivo e a simulação ficam bloqueadas até haver pelo menos um MP4 pronto na fila. O botão de parar permanece disponível se a transmissão já estiver em andamento.</p>
 {% endif %}
 
 <div class="grid grid-2 mb-3">
     <div class="card">
-        <h3>Streaming</h3>
-        <div id="status-streaming" class="mb-1">
+        <h3>Transmissão RTMP</h3>
+        <div id="status-streaming" class="mb-2">
             {% if status.connected and status.is_streaming %}
-            <span class="status-badge status-on">LIVE</span>
+            <span class="status-badge status-on pulse">● TRANSMITINDO AO VIVO</span>
             {% else %}
             <span class="status-badge status-off">OFFLINE</span>
             {% endif %}
         </div>
+        <div class="text-sm text-muted">
+            Status do encoder OBS e conexão com destino RTMP.
+        </div>
     </div>
     <div class="card">
-        <h3>Current State</h3>
+        <h3>Status do OBS WebSocket</h3>
         <div id="status-state" class="text-sm text-muted">
             {% if not status.connected %}
-            <span style="color:var(--danger-color)">⚠ OBS not connected</span><br>
-            <span class="text-muted">Make sure OBS is running and WebSocket is enabled (Tools → WebSocket Server Settings).</span>
+            <span style="color:var(--danger-color); font-weight:600;">⚠ OBS desconectado</span><br>
+            <span class="text-muted">Certifique-se de que o OBS está aberto e o WebSocket ativado (Ferramentas → Configurações do servidor WebSocket).</span>
             {% else %}
-            <p class="mb-1">Scene: <strong>{{ status.current_scene }}</strong></p>
-            <p class="mb-1">Resolution: <strong>{{ status.resolution }}</strong></p>
-            <p class="mb-1">FPS: <strong>{{ status.fps }}</strong></p>
-            <p>OBS WS: <strong>{{ status.obs_version or "connected" }}</strong></p>
+            <p class="mb-1">Cena atual: <strong style="color:var(--text-color)">{{ status.current_scene }}</strong></p>
+            <p class="mb-1">Resolução do Canvas: <strong style="color:var(--text-color)">{{ status.resolution }}</strong></p>
+            <p class="mb-1">Taxa de quadros: <strong style="color:var(--text-color)">{{ status.fps }} FPS</strong></p>
+            <p class="mb-0">Versão OBS WS: <strong style="color:var(--text-color)">{{ status.obs_version or "Conectado" }}</strong></p>
             {% endif %}
         </div>
-        <div class="mt-1" id="reconnect-wrap" style="{% if status.connected %}display:none{% endif %}">
+        <div class="mt-1" id="reconnect-wrap" style="{% if status.connected %}display:none{% endif %} margin-top:0.75rem;">
             <button class="btn btn-ghost" id="btn-reconnect"
                     hx-post="/api/obs/reconnect" hx-swap="none"
-                    hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">↺ Retry connection</button>
+                    hx-on:after-request="htmx.trigger(document.getElementById('dash-live'), 'load')">↺ Tentar reconectar ao OBS</button>
         </div>
     </div>
 </div>
 
 <div class="grid grid-2 mb-3">
     <div class="card">
-        <h3>Queue Player</h3>
-        <div id="cycle-status" class="mb-1">
+        <h3>Reprodutor da Fila</h3>
+        <div id="cycle-status" class="mb-2">
             {% if cycle.enabled %}
-            <span class="status-badge status-on">{{ cycle.state | upper }}</span>
+            <span class="status-badge status-on">ATIVO ({{ cycle.state | upper }})</span>
             {% else %}
-            <span class="status-badge status-off">DISABLED</span>
+            <span class="status-badge status-off">DESATIVADO</span>
             {% endif %}
+        </div>
+        <div class="text-sm text-muted">
+            Alternância inteligente entre vinhetas e vídeos da fila com lower third.
         </div>
     </div>
     <div class="card">
-        <h3>Cycle State</h3>
+        <h3>Estado do Ciclo</h3>
         <div id="cycle-state" class="text-sm text-muted">
             {% if cycle.message %}
-            <span {% if cycle.error %}style="color:var(--danger-color)"{% endif %}>{{ cycle.message }}</span>
+            <span {% if cycle.error %}style="color:var(--danger-color); font-weight:600;"{% else %}style="color:var(--text-color);"{% endif %}>{{ cycle.message }}</span>
             {% elif not cycle.enabled %}
-            No cycle active
+            Nenhum ciclo em execução no momento.
             {% elif cycle.state == 'stopped' %}
-            Waiting…
+            Aguardando...
             {% else %}
-            <p class="mb-1">Scene: <strong>{{ cycle.state }}</strong></p>
+            <p class="mb-1">Cena em exibição: <strong style="color:var(--text-color)">{{ cycle.state }}</strong></p>
             {% if cycle.current_video_title %}
-            <p class="mb-1">Playing: <strong>{{ cycle.current_video_title }}</strong></p>
+            <p class="mb-1">Vídeo no ar: <strong style="color:var(--accent-color)">{{ cycle.current_video_title }}</strong></p>
             {% endif %}
             {% endif %}
         </div>

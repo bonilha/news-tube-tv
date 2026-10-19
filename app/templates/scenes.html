@@ -1,22 +1,22 @@
 <div class="grid grid-2">
     {% for scene in scenes %}
-    <div class="card" {% if scene.active %}style="border-color: var(--accent-color)"{% endif %}>
+    <div class="card" {% if scene.active %}style="border-color: var(--accent-color); box-shadow: 0 0 0 1px var(--accent-color);"{% endif %}>
         <div class="flex flex-between flex-center mb-1">
             <h3 style="margin:0">{{ scene.name }}</h3>
             {% if scene.active %}
-                <span class="status-badge status-on">ACTIVE</span>
+                <span class="status-badge status-on pulse">ATIVA</span>
             {% endif %}
         </div>
-        <p class="text-muted text-sm mb-2">{{ scene.description or 'No description' }}</p>
+        <p class="text-muted text-sm mb-2">{{ scene.description or 'Sem descrição' }}</p>
         <div class="flex gap-1">
             <button class="btn btn-primary"
                     hx-post="/api/scenes/{{ scene.name | urlencode }}/switch" hx-swap="none"
-                    hx-on:after-request="setTimeout(()=>document.getElementById('status-poll').click(),300)">
-                Switch
+                    hx-on:after-request="var dash = document.getElementById('dash-live'); if (dash) htmx.trigger(dash, 'load'); var sc = document.getElementById('scene-list'); if (sc) htmx.trigger(sc, 'load');">
+                Ativar Cena
             </button>
             <a href="/editor/scene/{{ scene.name | urlencode }}" class="btn btn-ghost"
                hx-get="/editor/scene/{{ scene.name | urlencode }}" hx-target="#content" hx-push-url="true">
-                Edit
+                Editar Fontes
             </a>
         </div>
     </div>

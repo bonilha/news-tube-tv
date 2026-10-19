@@ -1,33 +1,42 @@
 {% if assets %}
+<div class="card" style="padding:0; overflow:hidden;">
 <table>
     <thead>
         <tr>
-            <th>Name</th>
-            <th>Type</th>
-            <th>Size</th>
-            <th>Uploaded</th>
-            <th></th>
+            <th>Nome do Arquivo</th>
+            <th>Tipo MIME</th>
+            <th>Tamanho</th>
+            <th>Data de Envio</th>
+            <th style="text-align:right;">Ações</th>
         </tr>
     </thead>
     <tbody>
         {% for asset in assets %}
         <tr>
-            <td>{{ asset.original_name }}</td>
-            <td class="text-muted text-sm">{{ asset.mime_type }}</td>
-            <td>{{ (asset.size / 1024) | round(1) }} KB</td>
+            <td><strong style="color:var(--text-color);">{{ asset.original_name }}</strong></td>
+            <td class="text-muted text-sm font-mono">{{ asset.mime_type }}</td>
+            <td class="text-sm">{{ (asset.size / 1024) | round(1) }} KB</td>
             <td class="text-muted text-sm">{{ asset.created_at }}</td>
-            <td>
-                <button class="btn btn-ghost"
-                        hx-delete="/assets/{{ asset.id }}"
-                        hx-target="#assets-table"
-                        hx-confirm="Delete {{ asset.original_name }}?">
-                    Delete
-                </button>
+            <td style="text-align:right;">
+                <div class="flex gap-1" style="justify-content:flex-end;">
+                    <a href="/assets/{{ asset.id }}/file" target="_blank" class="btn btn-ghost" style="padding:0.25rem 0.6rem; font-size:0.75rem;">
+                        Visualizar
+                    </a>
+                    <button class="btn btn-danger" style="padding:0.25rem 0.6rem; font-size:0.75rem;"
+                            hx-delete="/assets/{{ asset.id }}"
+                            hx-target="#assets-table"
+                            hx-confirm="Excluir {{ asset.original_name }} permanentemente?">
+                        Excluir
+                    </button>
+                </div>
             </td>
         </tr>
         {% endfor %}
     </tbody>
 </table>
+</div>
 {% else %}
-<p class="text-muted">No assets uploaded yet.</p>
+<div class="card" style="text-align:center; padding:2.5rem 1rem;">
+    <p class="text-muted" style="margin:0;">Nenhum arquivo enviado até o momento. Faça upload acima para usá-lo em suas cenas do OBS.</p>
+</div>
 {% endif %}

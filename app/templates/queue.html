@@ -8,22 +8,30 @@
     Remux quando o arquivo já está nesse formato.
 </p>
 
-<div class="flex gap-1 mb-2">
+<div class="flex gap-1 mb-2" style="flex-wrap:wrap;">
     <button class="btn btn-primary"
-            hx-post="/queue/scan" hx-target="#queue-table" hx-swap="innerHTML">
+            hx-post="/queue/scan" hx-target="#queue-table" hx-swap="innerHTML"
+            hx-indicator="#scan-spinner">
+        <span id="scan-spinner" class="spinner htmx-indicator"></span>
         ↻ Escanear canais
     </button>
     <button class="btn btn-ghost"
-            hx-post="/queue/expire" hx-target="#queue-table" hx-swap="innerHTML">
+            hx-post="/queue/expire" hx-target="#queue-table" hx-swap="innerHTML"
+            hx-indicator="#expire-spinner">
+        <span id="expire-spinner" class="spinner htmx-indicator"></span>
         ⏰ Expirar antigos (+24h)
     </button>
     <button class="btn btn-ghost"
-            hx-post="/queue/shuffle" hx-target="#queue-table" hx-swap="innerHTML">
+            hx-post="/queue/shuffle" hx-target="#queue-table" hx-swap="innerHTML"
+            hx-indicator="#shuffle-spinner">
+        <span id="shuffle-spinner" class="spinner htmx-indicator"></span>
         Randomizar ordem
     </button>
     <button class="btn btn-danger"
             hx-post="/queue/clear" hx-target="#queue-table" hx-swap="innerHTML"
-            hx-confirm="Apagar toda a fila, os arquivos, e escanear de novo?">
+            hx-confirm="Apagar toda a fila, os arquivos, e escanear de novo?"
+            hx-indicator="#clear-spinner">
+        <span id="clear-spinner" class="spinner htmx-indicator"></span>
         Apagar fila e escanear
     </button>
 </div>

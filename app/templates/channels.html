@@ -1,22 +1,27 @@
 {% if not htmx %}{% extends "base.html" %}{% endif %}
 {% block content %}
-<h1 class="mb-2">YouTube Channels</h1>
+<h1 class="mb-2">Canais do YouTube</h1>
+<p class="text-muted text-sm mb-3">Gerencie os canais monitorados para a transmissão autônoma.</p>
 
 <div class="card mb-3">
-    <h3 class="mb-1">Add Channel</h3>
+    <h3 class="mb-2">Cadastrar Novo Canal</h3>
     <form hx-post="/channels/add" hx-target="#channels-table" hx-swap="innerHTML"
+          hx-indicator="#add-channel-spinner"
           class="flex gap-1" style="align-items:end; flex-wrap:wrap;">
-        <div style="flex:2; min-width:200px;">
-            <label class="text-sm text-muted" for="channel-url">Handle or URL</label>
-            <input type="text" id="channel-url" name="channel_url" placeholder="@canal ou URL do YouTube"
-                   style="width:100%; padding:0.5rem; border-radius:0.375rem; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); margin-top:0.25rem;" required>
+        <div style="flex:2; min-width:220px;">
+            <label class="text-sm text-muted" for="channel-url">Identificador (@handle) ou URL do YouTube</label>
+            <input type="text" id="channel-url" name="channel_url" placeholder="@exemplo ou https://youtube.com/@exemplo"
+                   style="width:100%; padding:0.5rem 0.75rem; border-radius:0.375rem; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); margin-top:0.25rem;" required>
         </div>
-        <div style="flex:0 1 120px; min-width:100px;">
-            <label class="text-sm text-muted" for="min-age">Idade mín. (h)</label>
+        <div style="flex:0 1 140px; min-width:120px;">
+            <label class="text-sm text-muted" for="min-age">Idade mínima (horas)</label>
             <input type="number" id="min-age" name="min_age_hours" value="2" min="0" step="0.5"
-                   style="width:100%; padding:0.5rem; border-radius:0.375rem; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); margin-top:0.25rem;">
+                   style="width:100%; padding:0.5rem 0.75rem; border-radius:0.375rem; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); margin-top:0.25rem;">
         </div>
-        <button type="submit" class="btn btn-primary" style="height:38px;">Add</button>
+        <button type="submit" class="btn btn-primary" style="height:38px;">
+            <span id="add-channel-spinner" class="spinner htmx-indicator"></span>
+            Adicionar Canal
+        </button>
     </form>
 </div>
 
