@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -55,7 +57,7 @@ _ENCODERS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
         ("-quality", "balanced", "-rc", "cqp", "-qp_i", "23", "-qp_p", "23"),
     )),
     ("h264_qsv", "Intel Quick Sync H.264", (
-        ("-preset", "medium", "-global_quality", "23"),
+        ("-preset", "veryfast", "-global_quality", "23", "-look_ahead", "0"),
     )),
     ("libx264", "CPU H.264", (
         ("-preset", "veryfast", "-crf", "23"),
@@ -63,6 +65,8 @@ _ENCODERS: tuple[tuple[str, str, tuple[tuple[str, ...], ...]], ...] = (
 )
 # A stalled YouTube connection must not hold the download lock until the process dies.
 _SOCKET_TIMEOUT_SEC = 30
+# Header-only. A full scan of a long MP4 is what made ffprobe hit 30s twice.
+_PROBE_TIMEOUT_SEC = 8
 _LATE = "Não ficou pronto no prazo da fila"
 # Integrated loudness for the next downloads. One gain for the whole file.
 _LOUDNORM = "loudnorm=I=-14:TP=-1.5:LRA=11"
@@ -108,6 +112,10 @@ _hold_player_release = False
 # Already shown this pass. They do not take a slot ahead of videos still waiting.
 _skip_keep: set[str] = set()
 # File OBS is playing. Kept on disk and not counted inside the five.
+# Free bytes required before another extra download. Set when a finished extra
+# crossed the disk cap and was removed, so the same file is not fetched again
+# on the next sync.
+_extra_block_until_free = 0
 _on_air_id: str = ""
 _stuck_deletes: set[str] = set()
 # Ids whose deadline already fired. The worker must not publish a late file.
@@ -259,7 +267,9 @@ def _encoder_works(name: str, args: tuple[str, ...]) -> bool:
         "-f", "null", "-",
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=20)
+        result = subprocess.run(
+            cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=20,
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         log.info("Encoder probe %s failed: %s", name, exc)
         return False
@@ -356,6 +366,59 @@ def retain_ids(rows: list[dict], limit: int, skip: set[str] | None = None, on_ai
     return keep
 
 
+def room_for_extra(
+    used_ratio: float,
+    free_bytes: int,
+    min_free_bytes: int,
+    cap: float,
+    block_until_free: int = 0,
+) -> bool:
+    """True when one more video past the floor may start.
+
+    `cap` is a fraction of the volume (0.75 means 75% full). A value of 0 or
+    more than 1 turns the percent check off. `block_until_free` is the free
+    space required after a video was deleted for crossing the cap.
+    """
+    if free_bytes < min_free_bytes:
+        return False
+    if 0 < cap <= 1 and used_ratio >= cap:
+        return False
+    if block_until_free > 0 and free_bytes < block_until_free:
+        return False
+    return True
+
+
+def disk_window(
+    ordered: list[str],
+    floor: int,
+    *,
+    on_air: str = "",
+    existing: set[str] | None = None,
+    over_cap: bool = False,
+) -> tuple[list[str], list[str]]:
+    """Floor ids plus extras already on disk, and at most one extra to delete.
+
+    The id to delete is the furthest extra that has a file and is not on air.
+    An empty second list means nothing past the floor should be removed.
+    """
+    floor_n = max(0, floor)
+    floor_ids = list(ordered[:floor_n])
+    extras = list(ordered[floor_n:])
+    on_disk = existing or set()
+    drop: list[str] = []
+    if over_cap:
+        for video_id in reversed(extras):
+            if video_id == on_air or video_id not in on_disk:
+                continue
+            drop = [video_id]
+            break
+    kept = [
+        video_id for video_id in extras
+        if video_id in on_disk and video_id not in drop
+    ]
+    return floor_ids + kept, drop
+
+
 def files_outside_keep(directory: Path, keep: set[str]) -> list[Path]:
     """Files in directory whose video id is not in keep. Final MP4s of keep stay."""
     if not directory.is_dir():
@@ -385,25 +448,125 @@ def shutdown() -> None:
     _kill_media_tools()
 
 
-def _kill_media_tools() -> None:
-    if os.name != "nt":
-        return
-    root = os.getpid()
-    script = (
-        "$all = Get-CimInstance Win32_Process; "
-        f"$kids = @($all | Where-Object {{ $_.ParentProcessId -eq {root} }}); "
-        "$ids = @($kids | ForEach-Object { $_.ProcessId }); "
-        "$grand = @($all | Where-Object { $ids -contains $_.ParentProcessId }); "
-        "@($kids + $grand) | Where-Object { $_.Name -in @('ffmpeg.exe','ffprobe.exe') } | "
-        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+_media_lock = threading.Lock()
+_media_pids: set[int] = set()
+
+
+def _halted(video_id: str) -> bool:
+    """Shuffle or a missed download deadline. Do not start another ffmpeg."""
+    return _download_hold > 0 or video_id in _abandoned
+
+
+def _register_pid(pid: int) -> None:
+    with _media_lock:
+        _media_pids.add(pid)
+
+
+def _forget_pid(pid: int) -> None:
+    with _media_lock:
+        _media_pids.discard(pid)
+
+
+def _taskkill(pid: int) -> None:
+    subprocess.run(
+        ["taskkill", "/F", "/T", "/PID", str(pid)],
+        capture_output=True,
+        timeout=8,
     )
+
+
+def _ffmpeg_descendant_pids() -> list[int]:
+    """ffmpeg/ffprobe started by this process, including yt-dlp's merger.
+
+    One Toolhelp snapshot. A CIM query of every process is what timed out
+    while the file was still open.
+    """
+    if os.name != "nt":
+        return []
+    TH32CS_SNAPPROCESS = 0x00000002
+    INVALID = ctypes.c_void_p(-1).value
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_uint32),
+            ("cntUsage", ctypes.c_uint32),
+            ("th32ProcessID", ctypes.c_uint32),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.c_uint32),
+            ("cntThreads", ctypes.c_uint32),
+            ("th32ParentProcessID", ctypes.c_uint32),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_uint32),
+            ("szExeFile", ctypes.c_wchar * 260),
+        ]
+
+    kernel = ctypes.windll.kernel32
+    snap = kernel.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+    if snap == INVALID:
+        return []
+    entry = PROCESSENTRY32W()
+    entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+    rows: list[tuple[int, int, str]] = []
     try:
-        subprocess.run(
-            ["powershell", "-NoProfile", "-Command", script],
-            capture_output=True, timeout=20,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        log.warning("Could not stop child ffmpeg processes")
+        ok = kernel.Process32FirstW(snap, ctypes.byref(entry))
+        while ok:
+            rows.append((
+                int(entry.th32ProcessID),
+                int(entry.th32ParentProcessID),
+                entry.szExeFile.lower(),
+            ))
+            ok = kernel.Process32NextW(snap, ctypes.byref(entry))
+    finally:
+        kernel.CloseHandle(snap)
+    root = os.getpid()
+    child_ids = {pid for pid, parent, _name in rows if parent == root}
+    return [
+        pid for pid, parent, name in rows
+        if name in {"ffmpeg.exe", "ffprobe.exe"}
+        and (parent == root or parent in child_ids)
+    ]
+
+
+def _kill_media_tools() -> None:
+    with _media_lock:
+        pids = list(_media_pids)
+    pids.extend(_ffmpeg_descendant_pids())
+    seen: set[int] = set()
+    for pid in pids:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            _taskkill(pid)
+        except (OSError, subprocess.TimeoutExpired):
+            log.warning("Could not stop child ffmpeg processes")
+            return
+
+
+def _run_captured(cmd: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Run ffprobe/ffmpeg and remember the pid so a deadline can taskkill it."""
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    _register_pid(proc.pid)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            _taskkill(proc.pid)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        try:
+            proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        _forget_pid(proc.pid)
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
 
 
 def downloads_held() -> bool:
@@ -601,8 +764,7 @@ async def sync_downloads() -> None:
     async with play_order_lock:
         generation = play_order_generation()
         rows = await _queue_rows()
-        keep = buffer_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep, _on_air_id)
-        keep_set = retain_ids(rows, settings.QUEUE_DOWNLOAD_KEEP, _skip_keep, _on_air_id)
+    keep, keep_set = await _window_for_disk(rows)
     await purge_expired(keep_set)
     if downloads_held() or play_order_generation() != generation:
         schedule_sync()
@@ -616,7 +778,8 @@ async def sync_downloads() -> None:
     elif not yt_cookies.ensure_fresh():
         log.warning("Skipping downloads: %s", yt_cookies.status()["message"])
     else:
-        await _download_keep(keep, generation, await audio_normalize_enabled())
+        floor = settings.QUEUE_DOWNLOAD_KEEP
+        await _download_keep(keep, generation, await audio_normalize_enabled(), floor)
 
     if downloads_held() or play_order_generation() != generation:
         schedule_sync()
@@ -632,14 +795,18 @@ async def sync_downloads() -> None:
     await remove_files(doomed)
 
 
-async def _download_keep(keep: list[str], generation: int, normalize: bool = True) -> None:
+async def _download_keep(
+    keep: list[str], generation: int, normalize: bool = True, floor: int | None = None,
+) -> None:
     """Download MP4s for the window. Missing files do not keep other ids on disk.
 
     A shuffle that commits a new play_order stops this list. The follow-up sync
     reads the finished order instead of downloading the old window.
     """
     global _current_download
-    for video_id in keep:
+    floor_n = len(keep) if floor is None else max(0, floor)
+    for index, video_id in enumerate(keep):
+        extra = index >= floor_n
         if downloads_held() or play_order_generation() != generation:
             return
         final = queue_file(video_id)
@@ -653,6 +820,12 @@ async def _download_keep(keep: list[str], generation: int, normalize: bool = Tru
         if final.exists() and final.stat().st_size > 0:
             await _store_path(video_id, final)
             continue
+        if extra and not _room_for_extra_now():
+            log.info(
+                "Disk cap %s%% reached; not downloading extra %s",
+                settings.QUEUE_DISK_CAP_PERCENT, video_id,
+            )
+            break
         label = _label(current, video_id)
         if raw_download(video_id):
             try:
@@ -662,12 +835,15 @@ async def _download_keep(keep: list[str], generation: int, normalize: bool = Tru
                 await _store_error(video_id, str(exc)[:300])
                 continue
             if final.exists() and final.stat().st_size > 0:
+                if extra and _over_disk_cap():
+                    await _reject_extra(video_id, final)
+                    break
                 await _store_path(video_id, final)
                 await remove_files([
                     path for path in _leftovers(video_id) if path != final
                 ])
                 continue
-        if not _enough_free_space():
+        if not extra and not _enough_free_space():
             log.warning(
                 "Free space below %s MB; not downloading %s",
                 settings.QUEUE_MIN_FREE_MB, video_id,
@@ -714,6 +890,9 @@ async def _download_keep(keep: list[str], generation: int, normalize: bool = Tru
             await remove_files(_leftovers(video_id))
             continue
         if final.exists() and final.stat().st_size > 0:
+            if extra and _over_disk_cap():
+                await _reject_extra(video_id, final)
+                break
             await _store_path(video_id, final)
             await remove_files([
                 path for path in _leftovers(video_id) if path != final
@@ -722,53 +901,51 @@ async def _download_keep(keep: list[str], generation: int, normalize: bool = Tru
             await _store_error(video_id, "yt-dlp did not produce an MP4")
 
 
-def _codecs(path: Path) -> tuple[str, str]:
-    """Return (video codec, audio codec) from ffprobe. Empty string if missing."""
+def _probe_media(path: Path) -> tuple[str, str, int, int]:
+    """Video codec, audio codec, width, height. One short ffprobe call.
+
+    Empty strings and 0 mean the header could not be read. Placement then
+    keeps the copy path for an MP4 yt-dlp already saved as avc1 when it can.
+    """
     cmd = [
         "ffprobe", "-v", "error",
-        "-show_entries", "stream=codec_type,codec_name",
-        "-of", "csv=p=0",
+        "-probesize", "5000000",
+        "-analyzeduration", "1000000",
+        "-show_entries", "stream=codec_type,codec_name,width,height",
+        "-of", "json",
         str(path),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = _run_captured(cmd, _PROBE_TIMEOUT_SEC)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log.warning("ffprobe failed for %s: %s", path.name, exc)
-        return "", ""
+        return "", "", 0, 0
+    if result.returncode != 0:
+        err = (result.stderr or b"").decode("utf-8", "replace").strip()
+        log.warning("ffprobe failed for %s: %s", path.name, err[:300] or result.returncode)
+        return "", "", 0, 0
+    try:
+        payload = json.loads(result.stdout or b"{}")
+    except json.JSONDecodeError:
+        log.warning("ffprobe returned broken JSON for %s", path.name)
+        return "", "", 0, 0
     video = audio = ""
-    for line in (result.stdout or "").splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 2:
+    width = height = 0
+    for stream in payload.get("streams") or []:
+        if not isinstance(stream, dict):
             continue
-        if "video" in parts and not video:
-            video = next(part for part in parts if part != "video")
-        elif "audio" in parts and not audio:
-            audio = next(part for part in parts if part != "audio")
-    return video, audio
-
-
-def _video_size(path: Path) -> tuple[int, int]:
-    """Pixel size of the first video stream. (0, 0) when ffprobe cannot tell."""
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=width,height",
-        "-of", "csv=p=0:s=x",
-        str(path),
-    ]
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        log.warning("ffprobe size failed for %s: %s", path.name, exc)
-        return 0, 0
-    line = (result.stdout or "").strip().splitlines()
-    if not line or "x" not in line[0]:
-        return 0, 0
-    width_text, _, height_text = line[0].partition("x")
-    try:
-        return int(width_text), int(height_text)
-    except ValueError:
-        return 0, 0
+        kind = stream.get("codec_type")
+        name = str(stream.get("codec_name") or "")
+        if kind == "video" and not video:
+            video = name
+            try:
+                width = int(stream.get("width") or 0)
+                height = int(stream.get("height") or 0)
+            except (TypeError, ValueError):
+                width = height = 0
+        elif kind == "audio" and not audio:
+            audio = name
+    return video, audio, width, height
 
 
 def _scale_filter() -> str:
@@ -800,9 +977,131 @@ def portrait_fill_filter() -> str:
         f"[bg]scale={blur_w}:{blur_h}:force_original_aspect_ratio=increase:flags=bilinear,"
         f"crop={blur_w}:{blur_h},gblur=sigma=8,eq=brightness=-0.2,"
         f"scale={width}:{height}:flags=bilinear,format=yuv420p[blurred];"
-        f"[fg]scale=-2:{height}:flags=lanczos,format=yuv420p[fgv];"
+        f"[fg]scale=-2:{height}:flags=bilinear,format=yuv420p[fgv];"
         "[blurred][fgv]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p[v]"
     )
+
+
+def _disk_cap_ratio() -> float:
+    percent = settings.QUEUE_DISK_CAP_PERCENT
+    if percent <= 0 or percent > 100:
+        return 0.0
+    return percent / 100.0
+
+
+def _volume_free() -> tuple[int, int] | None:
+    """Total and free bytes of the volume that holds the videos directory."""
+    try:
+        usage = shutil.disk_usage(settings.VIDEOS_DIR)
+    except OSError:
+        return None
+    if usage.total <= 0:
+        return None
+    return usage.total, usage.free
+
+
+def _refresh_extra_block(free_bytes: int) -> None:
+    global _extra_block_until_free
+    if _extra_block_until_free and free_bytes >= _extra_block_until_free:
+        _extra_block_until_free = 0
+
+
+def _room_for_extra_now() -> bool:
+    volume = _volume_free()
+    if volume is None:
+        return False
+    total, free = volume
+    _refresh_extra_block(free)
+    min_free = settings.QUEUE_MIN_FREE_MB * 1024 * 1024
+    return room_for_extra(
+        (total - free) / total, free, min_free, _disk_cap_ratio(), _extra_block_until_free,
+    )
+
+
+def _over_disk_cap() -> bool:
+    cap = _disk_cap_ratio()
+    if cap <= 0:
+        return False
+    volume = _volume_free()
+    if volume is None:
+        return True
+    total, free = volume
+    return (total - free) / total >= cap
+
+
+def _video_on_disk(video_id: str) -> bool:
+    final = queue_file(video_id)
+    if final.is_file() and final.stat().st_size > 0:
+        return True
+    legacy = settings.VIDEOS_DIR / f"{video_id}.mp4"
+    return legacy.is_file() and legacy.stat().st_size > 0
+
+
+async def _clear_local_path(video_id: str) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE queue SET local_path = '' WHERE video_id = ?",
+            (video_id,),
+        )
+        await db.commit()
+
+
+async def _reject_extra(video_id: str, final: Path) -> None:
+    """Drop an extra that crossed the cap and wait for that much free space again."""
+    global _extra_block_until_free
+    try:
+        size = final.stat().st_size
+    except OSError:
+        size = 0
+    await remove_files(_leftovers(video_id))
+    await _clear_local_path(video_id)
+    volume = _volume_free()
+    free_after = volume[1] if volume else 0
+    _extra_block_until_free = free_after + max(size, 1)
+    log.warning(
+        "Extra %s crossed the %s%% disk cap and was removed (%s bytes)",
+        video_id, settings.QUEUE_DISK_CAP_PERCENT, size,
+    )
+
+
+async def _window_for_disk(rows: list[dict]) -> tuple[list[str], set[str]]:
+    """Floor of QUEUE_DOWNLOAD_KEEP, then further ids while the volume is under the cap.
+
+    Extras already on disk are dropped from the end of the play order until the
+    volume is back under the cap. The id on air is never in that drop list.
+    Missing extras are appended only when another download is allowed, so this
+    sync can process more than the floor in one pass.
+    """
+    floor_n = settings.QUEUE_DOWNLOAD_KEEP
+    ordered = buffer_ids(rows, max(floor_n, 10_000), _skip_keep, _on_air_id)
+    volume = _volume_free()
+    if volume is not None:
+        _refresh_extra_block(volume[1])
+    existing = {video_id for video_id in ordered if _video_on_disk(video_id)}
+    while _over_disk_cap():
+        _keep, drop = disk_window(
+            ordered, floor_n, on_air=_on_air_id, existing=existing, over_cap=True,
+        )
+        if not drop:
+            break
+        video_id = drop[0]
+        await remove_files(_leftovers(video_id))
+        await _clear_local_path(video_id)
+        existing.discard(video_id)
+        log.info(
+            "Removed extra %s to stay under the %s%% disk cap",
+            video_id, settings.QUEUE_DISK_CAP_PERCENT,
+        )
+    keep, _drop = disk_window(
+        ordered, floor_n, on_air=_on_air_id, existing=existing, over_cap=False,
+    )
+    if _room_for_extra_now():
+        have = set(keep)
+        keep.extend(video_id for video_id in ordered if video_id not in have)
+    keep_set = set(keep)
+    if _on_air_id:
+        keep_set.add(_on_air_id)
+    return keep, keep_set
 
 
 def _enough_free_space() -> bool:
@@ -921,20 +1220,26 @@ def raw_download(video_id: str) -> Path | None:
 _FFMPEG_TIMEOUT_SEC = 30 * 60
 
 
-def _run_ffmpeg(source: Path, dest: Path, args: list[str]) -> None:
+def _run_ffmpeg(source: Path, dest: Path, args: list[str], video_id: str = "") -> bool:
+    """Encode into dest. False when a shuffle or deadline asked us to stop."""
+    if video_id and _halted(video_id):
+        return False
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
         "-i", str(source), *args, str(dest),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT_SEC)
+        result = _run_captured(cmd, _FFMPEG_TIMEOUT_SEC)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"ffmpeg failed: {exc}") from exc
     if result.returncode != 0 or not dest.exists() or dest.stat().st_size <= 0:
         err = (result.stderr or b"").decode("utf-8", "replace").strip()
         dest.unlink(missing_ok=True)
+        if video_id and _halted(video_id):
+            return False
         raise RuntimeError(err[-400:] or "ffmpeg produced no MP4")
+    return True
 
 
 def loudnorm_measure_args() -> list[str]:
@@ -1025,14 +1330,16 @@ def placement_action(
     return ["-c:v", encoder, *encoder_args, *(audio_out or ["-c:a", "aac", "-b:a", "160k"])]
 
 
-def _measure_loudness(source: Path) -> dict | None:
+def _measure_loudness(source: Path, video_id: str = "") -> dict | None:
     """Read integrated loudness. None leaves the file on the path it already had."""
+    if video_id and _halted(video_id):
+        return None
     cmd = [
         "ffmpeg", "-hide_banner", "-nostats",
         "-i", str(source), *loudnorm_measure_args(),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, timeout=_FFMPEG_TIMEOUT_SEC)
+        result = _run_captured(cmd, _FFMPEG_TIMEOUT_SEC)
     except (OSError, subprocess.TimeoutExpired) as exc:
         log.warning("Loudness measure failed for %s: %s", source.name, exc)
         return None
@@ -1055,7 +1362,7 @@ def _measure_loudness(source: Path) -> dict | None:
 
 def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> None:
     """Move or encode the downloaded file into videos/queue. Runs after yt-dlp."""
-    if video_id in _abandoned:
+    if _halted(video_id):
         return
     shown = label or video_id
     original = raw_download(video_id)
@@ -1065,7 +1372,7 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
     sponsor_file: Path | None = None
     if not settings.SPONSORBLOCK:
         say("SponsorBlock: desligado")
-    elif video_id not in _abandoned:
+    elif not _halted(video_id):
         sponsor_file = downloads_dir() / f"{video_id}.sponsor.mp4"
         if sponsor_file.exists():
             sponsor_file.unlink()
@@ -1073,15 +1380,16 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
         say(status)
         if cut is not None:
             source = cut
+    if _halted(video_id):
+        return
     final = queue_file(video_id)
-    video_codec, audio_codec = _codecs(source)
-    width, height = _video_size(source)
+    video_codec, audio_codec, width, height = _probe_media(source)
     target = (settings.OBS_BASE_WIDTH, settings.OBS_BASE_HEIGHT)
     portrait = is_portrait(width, height)
     needs_scale = needs_video_scale(video_codec, width, height, target)
     if normalize:
         say(f"Medindo volume: {shown}")
-    measured = _measure_loudness(source) if normalize else None
+    measured = _measure_loudness(source, video_id) if normalize else None
     if normalize and measured is None:
         log.warning("Keeping the original audio path for %s", video_id)
     action = placement_action(
@@ -1105,21 +1413,24 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
         say(f"Na fila: {shown}")
         return
     if portrait:
-        say(f"Preenchendo vertical em {target[0]}x{target[1]}: {shown}")
+        say(f"Preenchendo vertical em {target[0]}x{target[1]} ({_encoder_label or 'H.264'}): {shown}")
     elif needs_scale:
         say(f"Escalando para {target[0]}x{target[1]}: {shown}")
     elif video_codec == "h264" and "-c:v" in action and action[action.index("-c:v") + 1] == "copy":
         say(f"Copiando vídeo e normalizando áudio: {shown}")
     else:
         say(f"Recodificando para H.264: {shown}")
-    if video_id in _abandoned:
+    if _halted(video_id):
         return
     temp = downloads_dir() / f"{video_id}.encode.mp4"
     if temp.exists():
         temp.unlink()
     try:
-        _run_ffmpeg(source, temp, action)
+        if not _run_ffmpeg(source, temp, action, video_id):
+            return
     except RuntimeError as exc:
+        if _halted(video_id):
+            return
         active_enc = _encoder
         if active_enc and "-c:v" in action and active_enc in action:
             next_enc = fallback_to_next_encoder(active_enc)
@@ -1139,7 +1450,8 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
                 )
                 if temp.exists():
                     temp.unlink()
-                _run_ffmpeg(source, temp, fallback_action)
+                if not _run_ffmpeg(source, temp, fallback_action, video_id):
+                    return
             else:
                 raise
         else:
@@ -1160,21 +1472,27 @@ def _drop_sponsor_original(original: Path, source: Path, final: Path) -> None:
 
 
 async def _run_download(video_id: str, budget: float, normalize: bool = False, label: str = "") -> None:
-    """Download one id. A positive budget is the deadline; zero waits it out.
+    """Download one id. A positive budget is the deadline for yt-dlp only.
 
     Zero is an empty buffer. Capping that at zero seconds would stop the queue
     from ever filling. A stuck socket still dies via yt-dlp's socket timeout.
+
+    Sponsor cut, loudnorm, and the encode run after the file is on disk. They
+    are not abandoned when the air-time budget expires. A shuffle still stops
+    them through hold_downloads().
     """
     _abandoned.discard(video_id)
+    download = asyncio.to_thread(_download_mp4, video_id, label)
     if budget > 0:
-        await asyncio.wait_for(
-            asyncio.to_thread(_download_mp4, video_id, normalize, label), timeout=budget,
-        )
+        await asyncio.wait_for(download, timeout=budget)
+    else:
+        await download
+    if _halted(video_id):
         return
-    await asyncio.to_thread(_download_mp4, video_id, normalize, label)
+    await asyncio.to_thread(_place_in_queue, video_id, normalize, label)
 
 
-def _download_mp4(video_id: str, normalize: bool = False, label: str = "") -> None:
+def _download_mp4(video_id: str, label: str = "") -> None:
     import yt_dlp
 
     ensure_video_dirs()
@@ -1215,9 +1533,6 @@ def _download_mp4(video_id: str, normalize: bool = False, label: str = "") -> No
     if video_id in _abandoned:
         return
     say(f"Download concluído: {shown}")
-    # yt-dlp moves the file to the outtmpl after its own postprocessors.
-    # Placing it in queue has to happen after that, or it is moved back.
-    _place_in_queue(video_id, normalize, label)
 
 
 async def discard_all_downloads() -> None:

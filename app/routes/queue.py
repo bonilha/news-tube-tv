@@ -38,6 +38,7 @@ async def _queue_ctx(extra: dict | None = None) -> dict:
     ctx = {
         "encoder": queue_download.selected_encoder_label(),
         "download_keep": settings.QUEUE_DOWNLOAD_KEEP,
+        "disk_cap_percent": settings.QUEUE_DISK_CAP_PERCENT,
         "max_duration_minutes": settings.QUEUE_MAX_DURATION_MINUTES,
         **await cycle_manager.marks_for(extra.get("items") or []),
     }

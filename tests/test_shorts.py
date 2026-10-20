@@ -51,7 +51,7 @@ def test_portrait_fill_matches_the_blur_sample_on_full_hd(monkeypatch):
     assert "scale=192:108:force_original_aspect_ratio=increase" in graph
     assert "gblur=sigma=8" in graph
     assert "eq=brightness=-0.2" in graph
-    assert "scale=-2:1080:flags=lanczos" in graph
+    assert "scale=-2:1080:flags=bilinear" in graph
     assert "overlay=(W-w)/2:(H-h)/2" in graph
     assert is_portrait(1080, 1920) is True
     assert is_portrait(1920, 1080) is False

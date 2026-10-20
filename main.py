@@ -40,7 +40,7 @@ configure_logging()
 
 
 async def _queue_buffer_loop() -> None:
-    """Keep five MP4s ready. Does not scan channels or delete the on-air file."""
+    """Top up the MP4 buffer. Does not scan channels or delete the on-air file."""
     while True:
         minutes = settings.QUEUE_BUFFER_MINUTES
         if minutes <= 0:

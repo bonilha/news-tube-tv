@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 # Two callers that notice the same dead socket must not open two connections.
 _CONNECT_RETRY_SEC = 2.0
+_REQUEST_TIMEOUT_SEC = 30.0
 
 # Canonical scene names
 SCENE_PROGRAM = "SCENE_PROGRAM"
@@ -208,12 +209,37 @@ class OBSManager:
                     "op": 6,
                     "d": {"requestId": req_id, "requestType": req_type, "requestData": req_data or {}},
                 }))
-            return await asyncio.wait_for(future, timeout=30)
-        except (asyncio.TimeoutError, Exception) as e:
-            log.error("WebSocket request '%s' failed: %s", req_type, e)
+            return await asyncio.wait_for(future, timeout=_REQUEST_TIMEOUT_SEC)
+        except asyncio.TimeoutError as e:
+            # TimeoutError stringifies to "" on 3.11, which hid this failure.
+            log.error(
+                "WebSocket request '%s' failed: %s: %r",
+                req_type, type(e).__name__, e,
+            )
+            await self._drop_socket(ws)
+            return None
+        except Exception as e:
+            log.error(
+                "WebSocket request '%s' failed: %s: %r",
+                req_type, type(e).__name__, e,
+            )
             return None
         finally:
             self._pending_requests.pop(req_id, None)
+
+    async def _drop_socket(self, ws) -> None:
+        """Forget a socket that did not answer. The next call reconnects."""
+        if ws is None:
+            return
+        if self._ws is ws:
+            self._ws = None
+            for future in self._pending_requests.values():
+                if not future.done():
+                    future.set_result(None)
+        try:
+            await ws.close()
+        except Exception:
+            log.debug("OBS socket close after a failed request", exc_info=True)
 
     def on_event(self, handler: Callable[[str, dict], Awaitable[None]]):
         if handler not in self._event_handlers:
@@ -284,8 +310,15 @@ class OBSManager:
         """Switch the program scene."""
         if not await self._ensure_connected():
             return
-        await self._request("SetCurrentProgramScene", {"sceneName": scene_name})
-        self._current_scene = scene_name
+        resp = await self._request("SetCurrentProgramScene", {"sceneName": scene_name})
+        if resp and resp.get("requestStatus", {}).get("result", False):
+            self._current_scene = scene_name
+            return
+        if resp:
+            log.error(
+                "SetCurrentProgramScene refused %s: %s",
+                scene_name, resp.get("requestStatus", {}),
+            )
 
     async def start_streaming(self) -> tuple[bool, str]:
         """Write the configured RTMP target into OBS, then start the output."""

@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # videos/downloads holds the yt-dlp files. videos/queue holds playable MP4s.
     VIDEOS_DIR: Path = Path("videos")
     QUEUE_DOWNLOAD_KEEP: int = 5
+    # Extra MP4s past the floor stop when the videos volume is this full.
+    # 0 disables only the percent cap. The floor still obeys QUEUE_MIN_FREE_MB.
+    QUEUE_DISK_CAP_PERCENT: int = 75
     # Maximum video duration in minutes to be eligible for the queue (default 30 min)
     QUEUE_MAX_DURATION_MINUTES: int = 30
     # Give up on a media that will not finish and re-arm the cycle. 0 waits forever.

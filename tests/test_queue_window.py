@@ -3,7 +3,7 @@
 import time
 
 from app.cycle import next_in_pass, tail_scan_due
-from app.queue.download import buffer_ids, retain_ids
+from app.queue.download import buffer_ids, disk_window, retain_ids, room_for_extra
 
 
 def _row(video_id: str, play_order: int, **extra) -> dict:
@@ -128,6 +128,40 @@ def test_empty_unplayed_list_starts_the_same_order_again():
     video, wrapped = next_in_pass(rows, {"a", "b"})
     assert wrapped is True
     assert video["video_id"] == "a"
+
+
+def test_room_for_extra_respects_the_cap_and_the_free_floor():
+    cap = 0.75
+    min_free = 1024 * 1024 * 1024
+    assert room_for_extra(0.74, 20 * min_free, min_free, cap) is True
+    assert room_for_extra(0.75, 20 * min_free, min_free, cap) is False
+    assert room_for_extra(0.10, min_free - 1, min_free, cap) is False
+    assert room_for_extra(0.50, 2 * min_free, min_free, cap, block_until_free=3 * min_free) is False
+    assert room_for_extra(0.50, 3 * min_free, min_free, cap, block_until_free=3 * min_free) is True
+
+
+def test_under_the_cap_keeps_the_floor_and_extras_on_disk():
+    ordered = list("abcdefgh")
+    existing = set("abcdefg")
+    keep, drop = disk_window(ordered, 5, existing=existing, over_cap=False)
+    assert drop == []
+    assert keep == list("abcdefg")
+
+
+def test_over_the_cap_drops_only_the_furthest_extra():
+    ordered = list("abcdefgh")
+    existing = set("abcdefg")
+    keep, drop = disk_window(ordered, 5, on_air="a", existing=existing, over_cap=True)
+    assert drop == ["g"]
+    assert "a" not in drop
+    assert keep == list("abcdef")
+    # The on-air file is an extra at the end of the window. Drop the one before it.
+    keep_air, drop_air = disk_window(
+        ordered, 5, on_air="g", existing=existing, over_cap=True,
+    )
+    assert drop_air == ["f"]
+    assert "g" not in drop_air
+    assert keep_air == list("abcdeg")
 
 
 def test_tail_scan_runs_once_at_the_last_five():

@@ -106,21 +106,20 @@ def test_purge_drops_an_old_pending_row_and_keeps_the_one_on_air(monkeypatch, tm
 def test_ffmpeg_encode_and_measure_give_up_after_half_an_hour(monkeypatch, tmp_path):
     seen: dict = {}
 
-    def fake_run(cmd, capture_output, timeout):
+    def fake_run(cmd, timeout):
         seen["timeout"] = timeout
         dest = Path(cmd[-1])
         dest.write_bytes(b"mp4")
-        completed = subprocess.CompletedProcess(cmd, 0, b"", b"")
-        return completed
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
 
-    monkeypatch.setattr("app.queue.download.subprocess.run", fake_run)
-    _run_ffmpeg(tmp_path / "in.mp4", tmp_path / "out.mp4", ["-c", "copy"])
+    monkeypatch.setattr("app.queue.download._run_captured", fake_run)
+    assert _run_ffmpeg(tmp_path / "in.mp4", tmp_path / "out.mp4", ["-c", "copy"]) is True
     assert seen["timeout"] == _FFMPEG_TIMEOUT_SEC == 30 * 60
 
-    def timed_out(cmd, capture_output, timeout):
+    def timed_out(cmd, timeout):
         raise subprocess.TimeoutExpired(cmd, timeout)
 
-    monkeypatch.setattr("app.queue.download.subprocess.run", timed_out)
+    monkeypatch.setattr("app.queue.download._run_captured", timed_out)
     assert _measure_loudness(tmp_path / "in.mp4") is None
     try:
         _run_ffmpeg(tmp_path / "in.mp4", tmp_path / "late.mp4", ["-c", "copy"])
