@@ -12,6 +12,7 @@ from app.broadcast import get_control, save_audio_normalize, save_schedule
 from app.obs.services import locate_services_file
 from app.obs.stream_config import get_stream_config, save_stream_config, services_for
 from app.queue import cookies as yt_cookies
+from app.radar_style import RADAR_FONT_FAMILIES, get_radar_style, save_radar_style
 
 router = APIRouter(tags=["configs"])
 templates = Jinja2Templates(directory="app/templates")
@@ -39,6 +40,8 @@ async def _page_context(config: dict) -> dict:
         "cookie_state": yt_cookies.status(),
         "cookie_present": yt_cookies.cookie_file().is_file(),
         "control": await get_control(),
+        "radar_style": await get_radar_style(),
+        "radar_font_families": RADAR_FONT_FAMILIES,
     }
 
 
@@ -158,4 +161,30 @@ async def configs_schedule(
         return _html(request, ctx)
     ctx = await _page_context(config)
     ctx["schedule_saved"] = True
+    return _html(request, ctx)
+
+
+@router.post("/configs/radar-style", response_class=HTMLResponse)
+async def configs_radar_style(
+    request: Request,
+    title_font_family: str = Form("Manrope"),
+    title_font_size: int = Form(48),
+    channel_font_family: str = Form("Manrope"),
+    channel_font_size: int = Form(26),
+    _auth: bool = Depends(verify_credentials),
+):
+    config = await get_stream_config()
+    try:
+        await save_radar_style(
+            title_font_family=title_font_family,
+            title_font_size=title_font_size,
+            channel_font_family=channel_font_family,
+            channel_font_size=channel_font_size,
+        )
+    except ValueError as exc:
+        ctx = await _page_context(config)
+        ctx["radar_style_error"] = str(exc)
+        return _html(request, ctx)
+    ctx = await _page_context(config)
+    ctx["radar_style_saved"] = True
     return _html(request, ctx)

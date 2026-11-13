@@ -197,8 +197,9 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 app.mount("/assets_files", StaticFiles(directory=settings.ASSETS_DIR), name="assets_files")
 
 # Routers
-from app.routes import dashboard, assets, editor, channels, queue, overlay, configs  # noqa: E402
+from app.routes import dashboard, assets, editor, channels, queue, overlay, configs, radar  # noqa: E402
 app.include_router(overlay.router)
+app.include_router(radar.router)
 app.include_router(dashboard.router)
 app.include_router(assets.router)
 app.include_router(editor.router)

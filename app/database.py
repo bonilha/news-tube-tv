@@ -37,6 +37,14 @@ CREATE TABLE IF NOT EXISTS stream_config (
     services_path TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS radar_display_config (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    title_font_family TEXT NOT NULL DEFAULT 'Manrope',
+    title_font_size INTEGER NOT NULL DEFAULT 48,
+    channel_font_family TEXT NOT NULL DEFAULT 'Manrope',
+    channel_font_size INTEGER NOT NULL DEFAULT 26
+);
+
 CREATE TABLE IF NOT EXISTS broadcast_control (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     limit_seconds INTEGER NOT NULL DEFAULT 0,
@@ -87,6 +95,7 @@ async def get_db() -> AsyncIterator[aiosqlite.Connection]:
 async def init_db() -> None:
     async with get_db() as db:
         await db.executescript(_DDL)
+        await db.execute("INSERT OR IGNORE INTO radar_display_config (id) VALUES (1)")
         # Rows left behind when a channel was deleted with foreign keys off.
         await db.execute(
             "DELETE FROM queue WHERE channel_id NOT IN (SELECT id FROM channels)"

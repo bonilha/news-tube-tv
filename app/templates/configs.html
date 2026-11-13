@@ -64,6 +64,46 @@
     <button type="submit" class="btn btn-primary">Salvar</button>
 </form>
 
+<form method="post" action="/configs/radar-style"
+      hx-post="/configs/radar-style" hx-target="#content" hx-swap="innerHTML"
+      class="card mt-2">
+    <h2 class="mb-2">Tipografia do Radar</h2>
+    <p class="text-sm text-muted mb-2">Escolha a fonte e o tamanho fixos do título do vídeo e do nome do canal exibidos em /radar.</p>
+    {% if radar_style_saved %}
+    <div class="mb-2" style="color:var(--success-color)">Tipografia do radar salva.</div>
+    {% endif %}
+    {% if radar_style_error %}
+    <div class="mb-2" style="color:var(--danger-color)">{{ radar_style_error }}</div>
+    {% endif %}
+    <div class="mb-2">
+        <h3 class="mb-1">Título do vídeo</h3>
+        <label class="text-sm text-muted" for="title-font-family">Fonte</label>
+        <select id="title-font-family" name="title_font_family" style="width:100%; padding:0.5rem; margin-top:0.25rem;">
+            {% for family in radar_font_families %}
+            <option value="{{ family }}" {% if radar_style.title_font_family == family %}selected{% endif %}>{{ family }}</option>
+            {% endfor %}
+        </select>
+        <label class="text-sm text-muted" for="title-font-size">Tamanho (24 a 72 px)</label>
+        <input type="number" id="title-font-size" name="title_font_size" min="24" max="72"
+               value="{{ radar_style.title_font_size }}" required
+               style="width:100%; padding:0.5rem; margin-top:0.25rem;">
+    </div>
+    <div class="mb-2">
+        <h3 class="mb-1">Nome do canal</h3>
+        <label class="text-sm text-muted" for="channel-font-family">Fonte</label>
+        <select id="channel-font-family" name="channel_font_family" style="width:100%; padding:0.5rem; margin-top:0.25rem;">
+            {% for family in radar_font_families %}
+            <option value="{{ family }}" {% if radar_style.channel_font_family == family %}selected{% endif %}>{{ family }}</option>
+            {% endfor %}
+        </select>
+        <label class="text-sm text-muted" for="channel-font-size">Tamanho (14 a 40 px)</label>
+        <input type="number" id="channel-font-size" name="channel_font_size" min="14" max="40"
+               value="{{ radar_style.channel_font_size }}" required
+               style="width:100%; padding:0.5rem; margin-top:0.25rem;">
+    </div>
+    <button type="submit" class="btn btn-primary">Salvar tipografia</button>
+</form>
+
 <form method="post" action="/configs/cookies" enctype="multipart/form-data"
       hx-post="/configs/cookies" hx-target="#content" hx-swap="innerHTML" hx-encoding="multipart/form-data"
       class="card mt-2">

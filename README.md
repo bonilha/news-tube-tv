@@ -22,4 +22,6 @@ python main.py
 
 O console fica em `http://127.0.0.1:8000`. O usuário e a senha vêm de `ADMIN_USER` e `ADMIN_PASSWORD` no `.env`.
 
+O radar financeiro e climático fica em `http://127.0.0.1:8000/radar` e pode ser usado como Browser Source no OBS. A página sincroniza título, canal e QR com o vídeo atual da transmissão e consulta Yahoo Finance, AwesomeAPI e Open-Meteo; os dados são atualizados a cada minuto. A rota e as APIs do radar são públicas para permitir o carregamento pelo OBS.
+
 `data.db`, `cookies/`, `videos/` e `assets/` ficam só na máquina. Não entram no git.

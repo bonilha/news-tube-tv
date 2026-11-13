@@ -85,6 +85,13 @@ def test_configs_checkbox_follows_the_saved_flag():
         services_found=False,
         services_missing=False,
         services_json="[]",
+        radar_style={
+            "title_font_family": "Manrope",
+            "title_font_size": 48,
+            "channel_font_family": "Manrope",
+            "channel_font_size": 26,
+        },
+        radar_font_families=("Manrope", "Arial"),
         cookie_state={"ok": True, "message": ""},
         cookie_present=False,
         control={
@@ -98,4 +105,8 @@ def test_configs_checkbox_follows_the_saved_flag():
     )
     assert 'name="audio_normalize"' in html
     assert "Normalizar áudio" in html
+    assert 'name="title_font_family"' in html
+    assert 'name="title_font_size"' in html
+    assert 'name="channel_font_family"' in html
+    assert 'name="channel_font_size"' in html
     assert "checked" in html.split("Normalizar áudio")[0][-80:]

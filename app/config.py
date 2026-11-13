@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     # YouTube Data API v3. Used only for exact publishedAt. Empty skips Google.
     YOUTUBE_API_KEY: str = "AIzaSyA9Q9we1-PK5wP25gyLXKZxVdg3WNlyqUs"
 
+    # AwesomeAPI currency quotes. Empty skips that source and keeps Yahoo.
+    AWESOMEAPI_KEY: str = ""
+
     # Language sent to Invidious (hl). Titles use this when a translation exists.
     CONTENT_LANGUAGE: str = "pt-BR"
 

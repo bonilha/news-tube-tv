@@ -1,0 +1,740 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1920, height=1080">
+<title>NewsTube TV - Broadcast Layout (Proporção Matemática Exata 16:9)</title>
+<style>
+  :root {
+    --bg-dark: #07101f;
+    --card-bg: rgba(9, 18, 36, 0.88);
+    --card-border: rgba(45, 78, 130, 0.4);
+    --gold: #f5c02b;
+    --gold-glow: rgba(245, 192, 43, 0.35);
+    --cyan: #38bdf8;
+    --green: #10b981;
+    --red: #ef4444;
+    --sub: #94a3b8;
+    --text: #f8fafc;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  
+  body {
+    width: 1920px;
+    height: 1080px;
+    overflow: hidden;
+    position: relative;
+    background: #040914;
+    color: var(--text);
+  }
+
+  /* Fundo Oficial */
+  .bg-stage {
+    position: absolute;
+    inset: 0;
+    width: 1920px;
+    height: 1080px;
+    object-fit: cover;
+    z-index: 1;
+    filter: brightness(0.65) contrast(1.1);
+  }
+
+  /* Linhas angulares em neon dourado inspiradas no esboço do usuário */
+  .neon-line-left {
+    position: absolute;
+    top: -120px;
+    left: 280px;
+    width: 8px;
+    height: 560px;
+    background: linear-gradient(180deg, transparent, var(--gold), transparent);
+    transform: rotate(38deg);
+    z-index: 2;
+    filter: drop-shadow(0 0 16px var(--gold));
+    opacity: 0.85;
+  }
+  .neon-line-right {
+    position: absolute;
+    bottom: 20px;
+    right: 280px;
+    width: 8px;
+    height: 500px;
+    background: linear-gradient(180deg, transparent, var(--gold), transparent);
+    transform: rotate(40deg);
+    z-index: 2;
+    filter: drop-shadow(0 0 16px var(--gold));
+    opacity: 0.85;
+  }
+
+  /* Container Geral 1920x1080 */
+  .tv-container {
+    position: relative;
+    z-index: 10;
+    width: 1920px;
+    height: 1080px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 24px 32px 0 32px;
+  }
+
+  /* Top Section: Lateral Esquerda (380px) + Vídeo Central 16:9 (1056x594) + Lateral Direita (380px) */
+  .top-section {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    height: 640px;
+  }
+
+  .side-col {
+    width: 380px;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .card-section {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    padding: 12px 16px;
+    backdrop-filter: blur(14px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+
+  .sec-title {
+    font-size: 13px;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  /* Itens com Gráfico Sparkline */
+  .market-row {
+    display: grid;
+    grid-template-columns: 1fr 130px;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+  .market-row:last-child { border-bottom: none; }
+  .market-info-name {
+    font-size: 11px;
+    font-weight: 800;
+    text-transform: uppercase;
+    color: var(--sub);
+  }
+  .market-info-val {
+    font-size: 19px;
+    font-weight: 900;
+    color: #fff;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .market-info-delta {
+    font-size: 11px;
+    font-weight: 800;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .market-sparkline {
+    width: 100%;
+    height: 36px;
+  }
+
+  .up { color: var(--green); }
+  .down { color: var(--red); }
+
+  /* Impostômetro & Indicadores (Lateral Esquerda) */
+  .imposto-card {
+    background: linear-gradient(160deg, rgba(15, 25, 48, 0.95), rgba(8, 14, 28, 0.95));
+    border: 1px solid rgba(245, 192, 43, 0.35);
+    padding: 10px 14px;
+    border-radius: 12px;
+    margin-bottom: 8px;
+  }
+  .imposto-tag {
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    color: var(--gold);
+    display: flex;
+    justify-content: space-between;
+  }
+  .imposto-counter {
+    background: #020611;
+    border: 1px solid rgba(245, 192, 43, 0.25);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 19px;
+    font-weight: 900;
+    color: var(--gold);
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    margin: 6px 0 4px 0;
+    box-shadow: inset 0 2px 6px rgba(0,0,0,0.8);
+  }
+  .imposto-pace {
+    font-size: 10px;
+    color: var(--sub);
+    display: flex;
+    justify-content: space-between;
+  }
+
+  .macro-table {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .macro-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  .macro-label { font-weight: 800; color: var(--sub); text-transform: uppercase; font-size: 11px; }
+  .macro-val { font-weight: 900; color: #fff; font-variant-numeric: tabular-nums; }
+
+  /* ==============================================================
+     ÁREA DO VÍDEO NATIVO 16:9 (1056px x 594px = Exatamente 16:9)
+     Totalmente desobstruída! Nenhuma informação fica sobreposta.
+     ============================================================== */
+  .video-stage-center {
+    width: 1056px;
+    height: 594px;
+    position: relative;
+    background: #000;
+    border-radius: 18px;
+    border: 2px solid rgba(245, 192, 43, 0.45);
+    box-shadow: 0 14px 44px rgba(0,0,0,0.85);
+    overflow: hidden;
+    flex: none;
+    margin: 0 16px;
+  }
+  .video-stage-center img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  /* LATERAL DIREITA: Logo Oficial + Moedas + Bolsas & Previsão */
+  .logo-header-right {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0 10px 10px 10px;
+  }
+  .logo-official-img {
+    height: 88px;
+    width: auto;
+    object-fit: contain;
+    filter: drop-shadow(0 0 16px rgba(245, 192, 43, 0.45));
+  }
+
+  .currency-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .currency-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 4px 6px;
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: 8px;
+  }
+  .curr-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .curr-flag { font-size: 16px; }
+  .curr-name {
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--sub);
+    text-transform: uppercase;
+  }
+  .curr-val {
+    font-size: 16px;
+    font-weight: 900;
+    color: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+  .curr-delta {
+    font-size: 12px;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    min-width: 65px;
+    text-align: right;
+  }
+
+  .weather-compact {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .weather-pill {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 6px;
+  }
+  .w-city-text { font-size: 12px; font-weight: 700; color: #e2e8f0; }
+  .w-temp-text { font-size: 14px; font-weight: 900; color: var(--gold); }
+
+  /* ==============================================================
+     ÁREA DE INFORMAÇÕES DO VÍDEO (EMBAIXO DO VÍDEO, SEM TAPAR NADA!)
+     ============================================================== */
+  .lower-info-row {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    gap: 24px;
+    align-items: center;
+    height: 140px;
+    margin-bottom: 12px;
+  }
+
+  /* Caixa do QR Code à esquerda */
+  .qr-box-wrap {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    padding: 12px 18px;
+    height: 100%;
+    backdrop-filter: blur(12px);
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  }
+  .qr-code-img {
+    width: 76px;
+    height: 76px;
+    background: #fff;
+    border: 3px solid var(--gold);
+    border-radius: 8px;
+    padding: 4px;
+    flex: none;
+    box-shadow: 0 0 14px var(--gold-glow);
+  }
+  .qr-code-img svg { width: 100%; height: 100%; }
+  .qr-call {
+    font-size: 13px;
+    font-weight: 800;
+    color: var(--text);
+    line-height: 1.3;
+  }
+  .qr-call span { color: var(--gold); }
+
+  /* Tarja Central de Manchete com Badge "AO VIVO" Amarelo */
+  .headline-banner {
+    display: flex;
+    align-items: stretch;
+    height: 100%;
+    background: linear-gradient(90deg, #071329 0%, #0d1e3d 60%, rgba(13, 30, 61, 0.85) 100%);
+    border: 1px solid rgba(245, 192, 43, 0.4);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.7);
+  }
+  .live-badge-vertical {
+    background: var(--gold);
+    color: #07101f;
+    font-weight: 900;
+    font-size: 15px;
+    letter-spacing: 0.15em;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 20px;
+    writing-mode: vertical-rl;
+    transform: rotate(180deg);
+    text-orientation: mixed;
+    flex: none;
+    box-shadow: 0 0 16px var(--gold-glow);
+  }
+  .headline-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 0 32px;
+    min-width: 0;
+  }
+  .headline-channel-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 4px;
+  }
+  .channel-name-tag {
+    color: var(--cyan);
+    font-weight: 800;
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .pub-date-tag {
+    color: var(--sub);
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .headline-main-title {
+    font-size: 32px;
+    font-weight: 900;
+    color: #fff;
+    letter-spacing: -0.01em;
+    line-height: 1.15;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .headline-sub-desc {
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--gold);
+    margin-top: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Rodapé Inferior */
+  .footer-bottom-bar {
+    display: grid;
+    grid-template-columns: 320px 1fr 340px;
+    align-items: center;
+    background: rgba(3, 8, 18, 0.95);
+    border-top: 1px solid rgba(245, 192, 43, 0.3);
+    margin: 0 -32px;
+    padding: 0 32px;
+    height: 48px;
+  }
+  .time-slot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: 800;
+    font-size: 15px;
+  }
+  .clock-bold {
+    font-size: 21px;
+    font-weight: 900;
+    color: var(--gold);
+    font-variant-numeric: tabular-nums;
+  }
+  .date-muted {
+    color: var(--sub);
+    font-size: 13px;
+  }
+  .brand-center-slot {
+    text-align: center;
+    font-size: 15px;
+    font-weight: 900;
+    letter-spacing: 0.05em;
+  }
+  .brand-center-slot span { color: var(--gold); }
+  .brand-center-slot small {
+    color: var(--sub);
+    font-weight: 700;
+    font-size: 13px;
+    margin-left: 8px;
+    letter-spacing: 0;
+  }
+  .slogan-right-slot {
+    background: var(--gold);
+    color: #040914;
+    font-weight: 900;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 20px;
+  }
+</style>
+</head>
+<body>
+
+  <!-- Background Oficial do Canal -->
+  <img class="bg-stage" src="background.png" alt="Broadcast Background">
+
+  <!-- Linhas decorativas em neon/ouro -->
+  <div class="neon-line-left"></div>
+  <div class="neon-line-right"></div>
+
+  <!-- Container Geral 1920x1080 -->
+  <div class="tv-container">
+    
+    <!-- SEÇÃO SUPERIOR: COLUNA ESQUERDA + VÍDEO 16:9 + COLUNA DIREITA -->
+    <div class="top-section">
+      
+      <!-- COLUNA ESQUERDA: MERCADOS (IBOV, DOLAR, DI) + IMPOSTÔMETRO + MACRO -->
+      <div class="side-col">
+        
+        <!-- Bloco Mercados -->
+        <div class="card-section" style="flex:1.2;">
+          <div class="sec-title">MERCADOS (BRASIL)</div>
+          
+          <!-- IBOVESPA -->
+          <div class="market-row">
+            <div>
+              <div class="market-info-name">IBOVESPA</div>
+              <div class="market-info-val">134.120</div>
+              <div class="market-info-delta up">▲ +1,15%</div>
+            </div>
+            <svg class="market-sparkline" viewBox="0 0 130 36">
+              <path d="M 0 32 Q 35 26, 65 18 T 100 10 T 130 4 L 130 36 L 0 36 Z" fill="rgba(16, 185, 129, 0.25)"/>
+              <path d="M 0 32 Q 35 26, 65 18 T 100 10 T 130 4" fill="none" stroke="#10b981" stroke-width="2.5"/>
+              <circle cx="130" cy="4" r="3" fill="#10b981"/>
+            </svg>
+          </div>
+
+          <!-- DÓLAR COMERCIAL -->
+          <div class="market-row">
+            <div>
+              <div class="market-info-name">DÓLAR COMERCIAL</div>
+              <div class="market-info-val">R$ 5,463</div>
+              <div class="market-info-delta down">▼ -0,45%</div>
+            </div>
+            <svg class="market-sparkline" viewBox="0 0 130 36">
+              <path d="M 0 26 Q 40 30, 70 18 T 105 22 T 130 12 L 130 36 L 0 36 Z" fill="rgba(245, 192, 43, 0.25)"/>
+              <path d="M 0 26 Q 40 30, 70 18 T 105 22 T 130 12" fill="none" stroke="#f5c02b" stroke-width="2.5"/>
+              <circle cx="130" cy="12" r="3" fill="#f5c02b"/>
+            </svg>
+          </div>
+
+          <!-- DI FUTURO -->
+          <div class="market-row">
+            <div>
+              <div class="market-info-name">DI FUTURO</div>
+              <div class="market-info-val">10,75%</div>
+              <div class="market-info-delta down">▼ -0,05 p.p.</div>
+            </div>
+            <svg class="market-sparkline" viewBox="0 0 130 36">
+              <path d="M 0 16 Q 40 20, 75 26 T 110 30 T 130 32 L 130 36 L 0 36 Z" fill="rgba(239, 68, 68, 0.2)"/>
+              <path d="M 0 16 Q 40 20, 75 26 T 110 30 T 130 32" fill="none" stroke="#ef4444" stroke-width="2.5"/>
+              <circle cx="130" cy="32" r="3" fill="#ef4444"/>
+            </svg>
+          </div>
+        </div>
+
+        <!-- Bloco Impostômetro + Indicadores -->
+        <div class="card-section" style="flex:1;">
+          <div class="imposto-card">
+            <div class="imposto-tag">
+              <span>IMPOSTÔMETRO (BRASIL)</span>
+              <span>2026</span>
+            </div>
+            <div class="imposto-counter">
+              R$ 3.429.163.870.333
+            </div>
+            <div class="imposto-pace">
+              <span>+R$ 130.263 / segundo</span>
+              <span style="color:var(--gold);">IBPT / ACSP</span>
+            </div>
+          </div>
+
+          <div class="macro-table">
+            <div class="macro-row">
+              <span class="macro-label">IPCA (12M)</span>
+              <span class="macro-val">3,89%</span>
+            </div>
+            <div class="macro-row">
+              <span class="macro-label">PIB (ANUAL)</span>
+              <span class="macro-val">2,15%</span>
+            </div>
+            <div class="macro-row">
+              <span class="macro-label">TAXA SELIC</span>
+              <span class="macro-val">10,75%</span>
+            </div>
+            <div class="macro-row">
+              <span class="macro-label">DESEMPREGO</span>
+              <span class="macro-val">6,80%</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- VÍDEO CENTRAL NATIVO 16:9 (1056 x 594 = 16:9 EXATO, SEM NADA POR CIMA) -->
+      <div class="video-stage-center">
+        <img src="dantas_16_9.jpg" alt="Vídeo 16:9 Nativo sem sobreposição">
+      </div>
+
+      <!-- COLUNA DIREITA: LOGO OFICIAL + MOEDAS + BOLSAS / CLIMA -->
+      <div class="side-col">
+        
+        <!-- Logo Oficial do Radar 24h -->
+        <div class="logo-header-right">
+          <img class="logo-official-img" src="logo.png" alt="Radar 24h">
+        </div>
+
+        <!-- Bloco Moedas -->
+        <div class="card-section" style="flex:1;">
+          <div class="sec-title">MOEDAS</div>
+          <div class="currency-list">
+            <div class="currency-row">
+              <div class="curr-left">
+                <span class="curr-flag">🇺🇸</span>
+                <div>
+                  <div class="curr-name">Dólar</div>
+                  <div class="curr-val">R$ 5,463</div>
+                </div>
+              </div>
+              <div class="curr-delta down">▼ -0,45%</div>
+            </div>
+
+            <div class="currency-row">
+              <div class="curr-left">
+                <span class="curr-flag">🇪🇺</span>
+                <div>
+                  <div class="curr-name">Euro</div>
+                  <div class="curr-val">R$ 6,136</div>
+                </div>
+              </div>
+              <div class="curr-delta down">▼ -0,19%</div>
+            </div>
+
+            <div class="currency-row">
+              <div class="curr-left">
+                <span class="curr-flag">🇬🇧</span>
+                <div>
+                  <div class="curr-name">Libra</div>
+                  <div class="curr-val">R$ 7,125</div>
+                </div>
+              </div>
+              <div class="curr-delta up">▲ +0,28%</div>
+            </div>
+
+            <div class="currency-row">
+              <div class="curr-left">
+                <span class="curr-flag">₿</span>
+                <div>
+                  <div class="curr-name">Bitcoin</div>
+                  <div class="curr-val">R$ 440.616</div>
+                </div>
+              </div>
+              <div class="curr-delta up">▲ +3,33%</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Bloco Bolsas & Previsão -->
+        <div class="card-section" style="flex:1;">
+          <div class="sec-title">
+            <span>BOLSAS & PREVISÃO</span>
+            <span style="font-size:10px; color:var(--cyan);">GLOBAL / TEMPO</span>
+          </div>
+
+          <div class="market-row" style="padding:2px 0;">
+            <div>
+              <div class="market-info-name">NASDAQ</div>
+              <div class="market-info-val" style="font-size:16px;">25.881</div>
+            </div>
+            <div class="market-info-delta up" style="justify-content:flex-end;">▲ +0,85%</div>
+          </div>
+
+          <div class="market-row" style="padding:2px 0;">
+            <div>
+              <div class="market-info-name">DOW JONES</div>
+              <div class="market-info-val" style="font-size:16px;">53.359</div>
+            </div>
+            <div class="market-info-delta up" style="justify-content:flex-end;">▲ +0,27%</div>
+          </div>
+
+          <div class="weather-compact">
+            <div class="weather-pill">
+              <span class="w-city-text">São Paulo</span>
+              <span class="w-temp-text">29°C ☀️</span>
+            </div>
+            <div class="weather-pill">
+              <span class="w-city-text">Rio de Janeiro</span>
+              <span class="w-temp-text">27°C ⛅</span>
+            </div>
+            <div class="weather-pill">
+              <span class="w-city-text">Brasília</span>
+              <span class="w-temp-text">25°C 🌤️</span>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- SEÇÃO INFERIOR: AS INFORMAÇÕES FICAM ABAIXO DO VÍDEO (SEM TAPAR O VÍDEO) -->
+    <div class="lower-info-row">
+      
+      <!-- QR Code com Link do Vídeo -->
+      <div class="qr-box-wrap">
+        <div class="qr-code-img">
+          <svg viewBox="0 0 100 100" fill="#000">
+            <rect x="5" y="5" width="30" height="30" fill="none" stroke="#000" stroke-width="6"/>
+            <rect x="13" y="13" width="14" height="14" fill="#000"/>
+            <rect x="65" y="5" width="30" height="30" fill="none" stroke="#000" stroke-width="6"/>
+            <rect x="73" y="13" width="14" height="14" fill="#000"/>
+            <rect x="5" y="65" width="30" height="30" fill="none" stroke="#000" stroke-width="6"/>
+            <rect x="13" y="73" width="14" height="14" fill="#000"/>
+            <rect x="45" y="10" width="8" height="20" fill="#000"/>
+            <rect x="45" y="45" width="20" height="10" fill="#000"/>
+            <rect x="70" y="60" width="20" height="25" fill="#000"/>
+          </svg>
+        </div>
+        <div class="qr-call">
+          Aponte a câmera<br>
+          <span>Acesse o vídeo original</span>
+        </div>
+      </div>
+
+      <!-- Tarja Central de Manchete com Badge "AO VIVO" Amarelo (Abaixo do Vídeo) -->
+      <div class="headline-banner">
+        <div class="live-badge-vertical">AO VIVO</div>
+        <div class="headline-content">
+          <div class="headline-channel-row">
+            <span class="channel-name-tag">@claudiodantassequeira</span>
+            <span class="pub-date-tag">• Publicado há 2 horas no YouTube</span>
+          </div>
+          <div class="headline-main-title">
+            ECONOMIA BRASILEIRA MOSTRA SINAIS DE RECUPERAÇÃO
+          </div>
+          <div class="headline-sub-desc">
+            Mercado reage a dados positivos e expectativas fiscais para os próximos meses
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- RODAPÉ: RELÓGIO + IDENTIDADE + SLOGAN -->
+    <footer class="footer-bottom-bar">
+      <div class="time-slot">
+        <span class="clock-bold">16:38:30</span>
+        <span class="date-muted">| 04/11/2026 | QUARTA-FEIRA</span>
+      </div>
+      <div class="brand-center-slot">
+        RADAR <span>24H</span> <small>| NOTÍCIAS E ANÁLISE POLÍTICA</small>
+      </div>
+      <div class="slogan-right-slot">
+        INFORMAÇÃO QUE MOVE O BRASIL
+      </div>
+    </footer>
+
+  </div>
+
+</body>
+</html>

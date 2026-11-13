@@ -11,7 +11,6 @@ from app.config import settings
 from app.database import get_db
 from app.obs.manager import SCENE_PROGRAM, obs_manager
 from app.overlay.copy import channel_label, published_line, youtube_url
-from app.overlay.title import fit_line
 
 log = logging.getLogger(__name__)
 
@@ -288,33 +287,14 @@ async def set_visible(visible: bool) -> None:
         await obs_manager.set_scene_item_enabled(scene, int(item.get("sceneItemId") or 0), visible)
 
 
-async def _title_limit_px() -> tuple[str, int, bool, float]:
-    """Font already on the title source, and the pixels from its X to the right edge."""
-    data = await obs_manager.get_input_settings(TITLE_SOURCE)
-    style = read_text_style(data.get("inputSettings") or {})
-    canvas_w, _ = await obs_manager.get_canvas_size()
-    x = float(_TEXT_X)
-    scale = 1.0
-    found = await _item_id(TITLE_SOURCE)
-    if found:
-        scene, item_id = found
-        tf = await obs_manager.get_scene_item_transform(scene, item_id)
-        x = float(tf.get("positionX") or 0)
-        scale = float(tf.get("scaleX") or 1) or 1.0
-    screen_px = max(0.0, canvas_w - x - 24)
-    return style["face"], int(style["size"]), bool(style["bold"]), screen_px / scale
-
-
 async def show_video(video_id: str) -> None:
     payload = await video_payload(video_id)
     if not payload:
         await set_visible(False)
         return
-    face, size, bold, limit = await _title_limit_px()
-    title = fit_line(payload["videoTitle"], face, size, bold, limit)
     await obs_manager.set_input_settings(DATE_SOURCE, {"text": payload["publishedLine"]})
     await obs_manager.set_input_settings(TITLE_SOURCE, {
-        "text": title,
+        "text": payload["videoTitle"],
         "extents_wrap": False,
         "custom_width": False,
         "word_wrap": 0,
