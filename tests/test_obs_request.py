@@ -39,6 +39,27 @@ def test_request_timeout_names_the_error(monkeypatch, caplog):
         manager._current_scene = previous_scene
 
 
+def test_keepalive_timeout_says_obs_is_stuck(monkeypatch, caplog):
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError(
+            "sent 1011 (internal error) keepalive ping timeout; no close frame received"
+        )
+
+    monkeypatch.setattr("app.obs.manager.websockets.connect", boom)
+    manager = OBSManager()
+    previous = manager._last_connect_attempt
+    manager._last_connect_attempt = 0
+    try:
+        with caplog.at_level(logging.WARNING):
+            ok = asyncio.run(manager.connect())
+        assert ok is False
+        assert "keepalive 1011" in caplog.text
+        assert "Reinicie o OBS" in caplog.text
+    finally:
+        manager._last_connect_attempt = previous
+        manager._ws = None
+
+
 def test_switch_scene_keeps_the_current_scene_when_obs_does_not_answer():
     manager = OBSManager()
     previous = manager._current_scene
@@ -55,7 +76,8 @@ def test_switch_scene_keeps_the_current_scene_when_obs_does_not_answer():
     manager._ensure_connected = connected
     manager._request = no_answer
     try:
-        asyncio.run(manager.switch_scene(SCENE_PROGRAM))
+        changed = asyncio.run(manager.switch_scene(SCENE_PROGRAM))
+        assert changed is False
         assert manager._current_scene == SCENE_OFFLINE
     finally:
         manager._ensure_connected = original_ensure

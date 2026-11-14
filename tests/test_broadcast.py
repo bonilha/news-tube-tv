@@ -283,9 +283,10 @@ def test_finish_waits_for_the_video_then_plays_the_bumper(monkeypatch):
     original = obs.switch_scene
 
     async def switch_scene(name):
-        await original(name)
+        changed = await original(name)
         if name == SCENE_PROGRAM:
             manager.request_finish()
+        return changed
 
     obs.switch_scene = switch_scene
     holds = {"n": 0}
@@ -342,6 +343,7 @@ def test_simulation_does_not_accumulate(monkeypatch):
         obs.switched.append(name)
         if obs.switched.count(SCENE_PROGRAM) >= 2:
             manager._enabled = False
+        return True
 
     obs.switch_scene = switch_scene
     _drive(manager, monkeypatch, [_row("first", 1, True), _row("second", 2, True)], obs)

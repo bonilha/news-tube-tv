@@ -29,6 +29,7 @@ class FakeObs:
 
     async def switch_scene(self, scene_name):
         self.switched.append(scene_name)
+        return True
 
 
 class FakeOverlay:
@@ -168,9 +169,10 @@ def test_cycle_rearms_bumper_and_stops_when_disabled(mgr, monkeypatch):
     original = obs.switch_scene
 
     async def switch_scene(scene_name):
-        await original(scene_name)
+        changed = await original(scene_name)
         if len(obs.switched) >= 3:
             mgr._enabled = False
+        return changed
 
     monkeypatch.setattr(obs, "switch_scene", switch_scene)
     asyncio.run(mgr._run_cycle())

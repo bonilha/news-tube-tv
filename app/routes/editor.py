@@ -212,7 +212,14 @@ async def update_transform(
     _auth: bool = Depends(verify_credentials),
 ):
     body = await request.json()
-    # Width/height are canvas pixels. OBS stores scale; the manager converts.
+    items = await obs_manager.get_scene_items(scene_name)
+    source_name = ""
+    for item in items:
+        if int(item.get("sceneItemId") or 0) == item_id:
+            source_name = item.get("sourceName") or ""
+            break
+    # Width/height are canvas pixels. The queue video fits that box.
+    # Other sources stay on independent scale.
     ok = await obs_manager.set_scene_item_transform(
         scene_name, item_id,
         position_x=body.get("positionX"),
@@ -220,6 +227,7 @@ async def update_transform(
         width=body.get("width"),
         height=body.get("height"),
         rotation=body.get("rotation"),
+        fit_box=source_name == "NewsTube Fila",
     )
     transform = await obs_manager.get_scene_item_transform(scene_name, item_id)
     return JSONResponse({"ok": ok, "transform": transform})

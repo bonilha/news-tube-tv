@@ -218,6 +218,23 @@ def selected_encoder_label() -> str:
     return _encoder_label
 
 
+def encode_choice() -> tuple[str, tuple[str, ...], str]:
+    """Encoder for a queue recode.
+
+    The boot probe stays as it is. While the live is on and that probe picked
+    Intel Quick Sync, the recode uses libx264 so OBS keeps Quick Sync.
+    """
+    if _encoder == "h264_qsv" and _obs_is_streaming():
+        return "libx264", ("-preset", "veryfast", "-crf", "23"), "CPU H.264"
+    return _encoder or "", _encoder_args, _encoder_label
+
+
+def _obs_is_streaming() -> bool:
+    from app.obs.manager import obs_manager
+
+    return bool(obs_manager.is_streaming)
+
+
 def probe_encoders() -> str | None:
     """Pick the first H.264 encoder that can actually encode a short frame."""
     global _encoder, _encoder_args, _encoder_label
@@ -1392,6 +1409,7 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
     measured = _measure_loudness(source, video_id) if normalize else None
     if normalize and measured is None:
         log.warning("Keeping the original audio path for %s", video_id)
+    encoder, encoder_args, encoder_label = encode_choice()
     action = placement_action(
         video_codec=video_codec,
         audio_codec=audio_codec,
@@ -1399,8 +1417,8 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
         needs_scale=needs_scale,
         normalize=normalize,
         measured=measured,
-        encoder=_encoder or "",
-        encoder_args=_encoder_args,
+        encoder=encoder,
+        encoder_args=encoder_args,
         scale_filter=portrait_fill_filter() if portrait else _scale_filter(),
         portrait=portrait,
     )
@@ -1413,7 +1431,7 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
         say(f"Na fila: {shown}")
         return
     if portrait:
-        say(f"Preenchendo vertical em {target[0]}x{target[1]} ({_encoder_label or 'H.264'}): {shown}")
+        say(f"Preenchendo vertical em {target[0]}x{target[1]} ({encoder_label or 'H.264'}): {shown}")
     elif needs_scale:
         say(f"Escalando para {target[0]}x{target[1]}: {shown}")
     elif video_codec == "h264" and "-c:v" in action and action[action.index("-c:v") + 1] == "copy":
@@ -1431,11 +1449,12 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
     except RuntimeError as exc:
         if _halted(video_id):
             return
-        active_enc = _encoder
-        if active_enc and "-c:v" in action and active_enc in action:
+        active_enc = encoder
+        if active_enc and active_enc != "libx264" and "-c:v" in action and active_enc in action:
             next_enc = fallback_to_next_encoder(active_enc)
             if next_enc:
                 log.warning("Retentando ffmpeg para %s com codificador de fallback: %s", video_id, next_enc)
+                retry_encoder, retry_args, _retry_label = encode_choice()
                 fallback_action = placement_action(
                     video_codec=video_codec,
                     audio_codec=audio_codec,
@@ -1443,8 +1462,8 @@ def _place_in_queue(video_id: str, normalize: bool = False, label: str = "") -> 
                     needs_scale=needs_scale,
                     normalize=normalize,
                     measured=measured,
-                    encoder=_encoder or "",
-                    encoder_args=_encoder_args,
+                    encoder=retry_encoder,
+                    encoder_args=retry_args,
                     scale_filter=portrait_fill_filter() if portrait else _scale_filter(),
                     portrait=portrait,
                 )

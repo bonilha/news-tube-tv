@@ -40,6 +40,57 @@ SCENE_DESCRIPTIONS = {
 }
 
 
+# Top-left of the item. The page's x/y is the corner of the designated box.
+_ALIGN_TOP_LEFT = 5
+# Center the picture inside that box.
+_ALIGN_CENTER = 0
+_PLAYER_SOURCE = "NewsTube Fila"
+
+
+def video_box_transform(
+    position_x: float,
+    position_y: float,
+    width: float,
+    height: float,
+    rotation: float | None = None,
+) -> dict[str, Any]:
+    """Fit NewsTube Fila inside the rectangle the page sent.
+
+    Bounds stay on the item, so the next file keeps the same area when its
+    pixel size changes. Scale is 1 so an older scale is not applied first.
+    """
+    transform: dict[str, Any] = {
+        "positionX": float(position_x),
+        "positionY": float(position_y),
+        "alignment": _ALIGN_TOP_LEFT,
+        "boundsType": "OBS_BOUNDS_SCALE_INNER",
+        "boundsAlignment": _ALIGN_CENTER,
+        "boundsWidth": float(width),
+        "boundsHeight": float(height),
+        "scaleX": 1.0,
+        "scaleY": 1.0,
+    }
+    if rotation is not None:
+        transform["rotation"] = float(rotation)
+    return transform
+
+
+def reported_item_size(transform: dict) -> tuple[float, float]:
+    """The box the editor shows. Active bounds are that box."""
+    bounds_type = transform.get("boundsType") or "OBS_BOUNDS_NONE"
+    bounds_w = float(transform.get("boundsWidth") or 0)
+    bounds_h = float(transform.get("boundsHeight") or 0)
+    if bounds_type not in ("", "OBS_BOUNDS_NONE") and bounds_w > 0 and bounds_h > 0:
+        return bounds_w, bounds_h
+    width = float(transform.get("width") or 0)
+    height = float(transform.get("height") or 0)
+    if width <= 0:
+        width = _visible_source_size(transform, "Width") * float(transform.get("scaleX") or 1)
+    if height <= 0:
+        height = _visible_source_size(transform, "Height") * float(transform.get("scaleY") or 1)
+    return width, height
+
+
 def _visible_source_size(transform: dict, axis: str) -> float:
     """Source pixels that remain after crop. axis is 'Width' or 'Height'."""
     source = float(transform.get(f"source{axis}") or 0)
@@ -116,7 +167,9 @@ class OBSManager:
             # Preview frames can exceed the library default of 1 MiB and
             # close the socket (1009). Keep headroom for a full-scene JPEG.
             ws = await websockets.connect(
-                settings.OBS_WS_URL, max_size=8 * 1024 * 1024,
+                settings.OBS_WS_URL,
+                max_size=8 * 1024 * 1024,
+                open_timeout=10,
             )
             self._ws = ws
             hello = json.loads(await ws.recv())
@@ -151,7 +204,14 @@ class OBSManager:
             log.info("Connected to OBS WebSocket v%s", self._obs_version)
             return True
         except Exception as e:
-            log.warning("Cannot connect to OBS WebSocket: %s", e)
+            detail = str(e)
+            if "1011" in detail or "keepalive" in detail.lower():
+                log.warning(
+                    "OBS WebSocket parado (keepalive 1011). Reinicie o OBS: %s",
+                    e,
+                )
+            else:
+                log.warning("Cannot connect to OBS WebSocket: %s", e)
             self._ws = None
             return False
 
@@ -305,19 +365,20 @@ class OBSManager:
         if stream_resp:
             self._is_streaming = stream_resp.get("responseData", {}).get("outputActive", False)
 
-    async def switch_scene(self, scene_name: str):
-        """Switch the program scene."""
+    async def switch_scene(self, scene_name: str) -> bool:
+        """Switch the program scene. False when OBS does not confirm it."""
         if not await self._ensure_connected():
-            return
+            return False
         resp = await self._request("SetCurrentProgramScene", {"sceneName": scene_name})
         if resp and resp.get("requestStatus", {}).get("result", False):
             self._current_scene = scene_name
-            return
+            return True
         if resp:
             log.error(
                 "SetCurrentProgramScene refused %s: %s",
                 scene_name, resp.get("requestStatus", {}),
             )
+        return False
 
     async def start_streaming(self) -> tuple[bool, str]:
         """Write the configured RTMP target into OBS, then start the output."""
@@ -485,12 +546,7 @@ class OBSManager:
         if not status.get("result", False):
             return {}
         tf = dict(((resp or {}).get("responseData") or {}).get("sceneItemTransform") or {})
-        width = float(tf.get("width") or 0)
-        height = float(tf.get("height") or 0)
-        if width <= 0:
-            width = float(tf.get("sourceWidth") or 0) * float(tf.get("scaleX") or 1)
-        if height <= 0:
-            height = float(tf.get("sourceHeight") or 0) * float(tf.get("scaleY") or 1)
+        width, height = reported_item_size(tf)
         tf["width"] = width
         tf["height"] = height
         return tf
@@ -544,6 +600,7 @@ class OBSManager:
         width: float | None = None,
         height: float | None = None,
         rotation: float | None = None,
+        fit_box: bool = False,
     ) -> bool:
         current = await self._request("GetSceneItemTransform", {
             "sceneName": scene_name,
@@ -552,6 +609,22 @@ class OBSManager:
         current_tf = ((current or {}).get("responseData") or {}).get("sceneItemTransform") or {}
         src_w = _visible_source_size(current_tf, "Width")
         src_h = _visible_source_size(current_tf, "Height")
+
+        if fit_box and width is not None and height is not None and position_x is not None and position_y is not None:
+            transform = video_box_transform(position_x, position_y, width, height, rotation)
+            resp = await self._request("SetSceneItemTransform", {
+                "sceneName": scene_name,
+                "sceneItemId": scene_item_id,
+                "sceneItemTransform": transform,
+            })
+            status = (resp or {}).get("requestStatus", {})
+            if not status.get("result"):
+                log.warning(
+                    "SetSceneItemTransform %s/%s failed: %s",
+                    scene_name, scene_item_id, status.get("comment") or status.get("code"),
+                )
+                return False
+            return True
 
         transform: dict[str, Any] = {}
         if position_x is not None:

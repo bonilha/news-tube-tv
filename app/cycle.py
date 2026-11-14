@@ -674,14 +674,28 @@ class CycleManager:
                 self._current_id = video.get("video_id") or ""
                 self._protect()
                 self._publish_keep_skip()
-                await queue_svc.mark_status_by_video_id(self._current_id, "playing")
                 try:
-                    await obs_manager.set_input_settings(PLAYER_SOURCE, {
+                    loaded = await obs_manager.set_input_settings(PLAYER_SOURCE, {
                         "is_local_file": True,
                         "local_file": file_path,
                         "looping": False,
                     })
-                    await obs_manager.switch_scene(SCENE_PROGRAM)
+                    on_program = bool(loaded) and await obs_manager.switch_scene(SCENE_PROGRAM)
+                    if not on_program:
+                        # The file never reached the program output. Leave it
+                        # unaired so the next lap can try the same video.
+                        log.warning(
+                            "Program scene did not switch for %s",
+                            self._current_id,
+                        )
+                        self.set_message(_OBS_STALE, error=True)
+                        self._current_id = ""
+                        self._protect()
+                        self._publish_keep_skip()
+                        await overlay.hide()
+                        await asyncio.sleep(_OBS_BACKOFF_SEC)
+                        continue
+                    await queue_svc.mark_status_by_video_id(self._current_id, "playing")
                     self._state = _State.VIDEO
                     self._current_video_title = video.get("title") or ""
                     self._message = ""

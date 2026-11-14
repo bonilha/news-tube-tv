@@ -38,6 +38,7 @@ class FakeObs:
 
     async def switch_scene(self, scene_name):
         self.switched.append(scene_name)
+        return True
 
     async def stop_streaming(self):
         self.is_streaming = False
@@ -166,6 +167,7 @@ def run_cycle(mgr, monkeypatch, rows, statuses, stop_after, seconds=5.0):
         obs.switched.append(scene_name)
         if len(obs.switched) >= stop_after:
             mgr._enabled = False
+        return True
 
     monkeypatch.setattr(obs, "switch_scene", switch_scene)
     monkeypatch.setattr(cycle_mod, "obs_manager", obs)
@@ -196,6 +198,57 @@ def _expire_the_deadline(monkeypatch):
         return step["n"] * 10_000
 
     monkeypatch.setattr(cycle_mod, "_now", _now)
+
+
+def test_failed_program_switch_does_not_air(mgr, monkeypatch):
+    rows = [_row("clip", 1, True)]
+    monkeypatch.setattr(cycle_mod, "queue_svc", FakeQueue(rows))
+    obs = FakeObs([_PLAYING, _ENDED])
+
+    async def switch_scene(scene_name):
+        obs.switched.append(scene_name)
+        if scene_name == SCENE_PROGRAM:
+            mgr._enabled = False
+            return False
+        return True
+
+    monkeypatch.setattr(obs, "switch_scene", switch_scene)
+    monkeypatch.setattr(cycle_mod, "obs_manager", obs)
+
+    async def _drive():
+        task = asyncio.ensure_future(mgr._run_cycle())
+        try:
+            await asyncio.wait_for(task, timeout=2)
+        except asyncio.TimeoutError:
+            mgr._enabled = False
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    asyncio.run(_drive())
+    assert "clip" not in mgr._aired
+    assert SCENE_PROGRAM in obs.switched
+
+
+def test_qsv_recode_uses_cpu_while_the_live_is_on(monkeypatch):
+    from app.queue import download as download_mod
+
+    monkeypatch.setattr(download_mod, "_encoder", "h264_qsv")
+    monkeypatch.setattr(
+        download_mod, "_encoder_args",
+        ("-preset", "veryfast", "-global_quality", "23", "-look_ahead", "0"),
+    )
+    monkeypatch.setattr(download_mod, "_encoder_label", "Intel Quick Sync H.264")
+    monkeypatch.setattr(download_mod, "_obs_is_streaming", lambda: True)
+    name, args, _label = download_mod.encode_choice()
+    assert name == "libx264"
+    assert args == ("-preset", "veryfast", "-crf", "23")
+    monkeypatch.setattr(download_mod, "_obs_is_streaming", lambda: False)
+    name, args, _label = download_mod.encode_choice()
+    assert name == "h264_qsv"
+    assert args[0:2] == ("-preset", "veryfast")
 
 
 def test_deadline_skips_and_keeps_playing(mgr, monkeypatch):

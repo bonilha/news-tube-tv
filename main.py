@@ -150,11 +150,6 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(queue_download.probe_encoders)
     await asyncio.to_thread(yt_cookies.check_cookies)
     await obs_manager.connect()
-    from app.overlay.service import ensure_overlay
-    try:
-        await ensure_overlay()
-    except Exception:
-        log.exception("Lower third was not created")
     # Closed until startup_broadcast_queue finishes the scan and the shuffle.
     queue_download.hold_downloads()
     refresh = asyncio.create_task(_queue_refresh_loop())
