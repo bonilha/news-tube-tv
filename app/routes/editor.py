@@ -10,7 +10,7 @@ from fastapi.templating import Jinja2Templates
 from app.auth import verify_credentials
 from app.assets.service import asset_service
 from app.config import settings
-from app.obs.manager import SCENE_PROGRAM, obs_manager
+from app.obs.manager import obs_manager
 from app.overlay.service import (
     installed_font_faces,
     is_text_kind,
@@ -89,12 +89,6 @@ async def scene_items(
     request: Request, scene_name: str,
     _auth: bool = Depends(verify_credentials),
 ):
-    if scene_name == SCENE_PROGRAM:
-        from app.overlay.service import ensure_overlay
-        try:
-            await ensure_overlay()
-        except Exception:
-            pass
     items = await obs_manager.get_scene_items(scene_name)
     kinds = {
         row.get("inputName"): row.get("inputKind") or ""

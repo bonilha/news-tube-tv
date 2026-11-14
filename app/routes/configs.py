@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from app.auth import verify_credentials
 from app.broadcast import get_control, save_audio_normalize, save_schedule
 from app.obs.services import locate_services_file
+from app.obs.setup import provision_obs
 from app.obs.stream_config import get_stream_config, save_stream_config, services_for
 from app.queue import cookies as yt_cookies
 from app.radar_style import RADAR_FONT_FAMILIES, get_radar_style, save_radar_style
@@ -135,6 +136,18 @@ async def configs_audio(
     config = await get_stream_config()
     ctx = await _page_context(config)
     ctx["audio_saved"] = True
+    return _html(request, ctx)
+
+
+@router.post("/configs/obs-setup", response_class=HTMLResponse)
+async def configs_obs_setup(request: Request, _auth: bool = Depends(verify_credentials)):
+    config = await get_stream_config()
+    ctx = await _page_context(config)
+    result = await provision_obs()
+    if result.get("ok"):
+        ctx["obs_setup_message"] = result["message"]
+    else:
+        ctx["obs_setup_error"] = result.get("error") or "OBS não está conectado."
     return _html(request, ctx)
 
 

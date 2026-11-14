@@ -269,7 +269,7 @@ class OBSManager:
         return await self.connect()
 
     async def connect(self) -> bool:
-        """Connect and optionally create missing scenes."""
+        """Connect. Canonical scenes are created only from Configurações."""
         async with self._connect_lock:
             if self._ws:
                 return True
@@ -281,7 +281,6 @@ class OBSManager:
             self._last_connect_attempt = now
             ok = await self._connect()
             if ok:
-                await self._ensure_scenes()
                 await self._refresh_state()
             return ok
 

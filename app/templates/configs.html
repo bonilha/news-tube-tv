@@ -1,7 +1,7 @@
 {% if not htmx %}{% extends "base.html" %}{% endif %}
 {% block content %}
 <h1 class="mb-2">Configurações Gerais</h1>
-<p class="text-muted text-sm mb-3">Definições de transmissão RTMP, autenticação do YouTube, normalização de áudio e agendamento automático.</p>
+<p class="text-muted text-sm mb-3">Definições de transmissão RTMP, autenticação do YouTube, normalização de áudio, agendamento automático e cenas do OBS.</p>
 
 {% if saved %}
 <div class="card mb-3" style="border-color:var(--success-color); background:rgba(16,185,129,0.1); color:var(--success-color); font-weight:600;">
@@ -145,6 +145,19 @@
         Normalizar áudio
     </label>
     <button type="submit" class="btn btn-ghost">Salvar</button>
+</form>
+
+<form method="post" action="/configs/obs-setup"
+      hx-post="/configs/obs-setup" hx-target="#content" hx-swap="innerHTML" class="card mt-2">
+    <h2 class="mb-2">Cenas do OBS</h2>
+    <p class="text-sm text-muted mb-2">Cria as cenas canônicas, a fonte NewsTube Fila e o lower third que ainda não existirem. O que já está no OBS permanece no lugar.</p>
+    {% if obs_setup_message %}
+    <div class="mb-2" style="color:var(--success-color)">{{ obs_setup_message }}</div>
+    {% endif %}
+    {% if obs_setup_error %}
+    <div class="mb-2" style="color:var(--danger-color)">{{ obs_setup_error }}</div>
+    {% endif %}
+    <button type="submit" class="btn btn-primary">Criar cenas no OBS</button>
 </form>
 
 <form method="post" action="/configs/schedule"

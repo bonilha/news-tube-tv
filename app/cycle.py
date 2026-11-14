@@ -259,10 +259,6 @@ class CycleManager:
             self._message = "Não foi possível criar a fonte NewsTube Fila em SCENE_PROGRAM."
             self._error = True
             return {"ok": False, "error": self._message}
-        try:
-            await overlay.ensure_overlay()
-        except Exception:
-            log.exception("Lower third was not created")
 
         self._bumper_input = bumper
         # A looping bumper never fires MediaInputPlaybackEnded. Without the event
@@ -441,7 +437,7 @@ class CycleManager:
         return ""
 
     async def _ensure_player_source(self, file_path: str) -> bool:
-        """Create 'NewsTube Fila' in SCENE_PROGRAM and load a real file.
+        """Load a file into NewsTube Fila when that source is already in SCENE_PROGRAM.
 
         An empty local_file has no size, so position and scale cannot be applied.
         SetInputSettings does not reset an existing transform.
@@ -449,20 +445,7 @@ class CycleManager:
         items = await obs_manager.get_scene_items(SCENE_PROGRAM)
         names = {item.get("sourceName") for item in items}
         if PLAYER_SOURCE not in names:
-            created = await obs_manager.create_input(
-                PLAYER_SOURCE, "ffmpeg_source",
-                {"is_local_file": True, "local_file": file_path, "looping": False},
-                scene_name=SCENE_PROGRAM,
-            )
-            if created is None:
-                inputs = await obs_manager.get_input_list()
-                exists = any(item.get("inputName") == PLAYER_SOURCE for item in inputs)
-                if not exists:
-                    return False
-                placed = await obs_manager.create_scene_item(SCENE_PROGRAM, PLAYER_SOURCE)
-                if placed is None:
-                    return False
-            log.info("Created player source '%s' in SCENE_PROGRAM", PLAYER_SOURCE)
+            return False
         ok = await obs_manager.set_input_settings(PLAYER_SOURCE, {
             "is_local_file": True,
             "local_file": file_path,
