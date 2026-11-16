@@ -71,6 +71,13 @@ def _updated_at() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _chart_series(payload: dict[str, Any]) -> list[float]:
+    result = payload["chart"]["result"][0]
+    quote_rows = (result.get("indicators") or {}).get("quote") or [{}]
+    closes = quote_rows[0].get("close") or []
+    return [value for item in closes if (value := _number(item)) is not None]
+
+
 async def fetch_yahoo_symbol(client: httpx.AsyncClient, symbol: str) -> dict[str, Any]:
     url = f"https://query2.finance.yahoo.com/v8/finance/chart/{quote(symbol, safe='')}"
     response = await client.get(url, params={"interval": "15m", "range": "1d"})
@@ -82,10 +89,16 @@ async def fetch_yahoo_symbol(client: httpx.AsyncClient, symbol: str) -> dict[str
     previous = _number(meta.get("previousClose")) or _number(meta.get("chartPreviousClose"))
     if price is None or previous is None or previous == 0:
         raise ValueError(f"Yahoo Finance não retornou cotação válida para {symbol}.")
-    closes = result["indicators"]["quote"][0].get("close") or []
-    series = [value for item in closes if (value := _number(item)) is not None]
+    series = _chart_series(payload)
+    # Sem pregão (fim de semana, feriado ou antes da abertura) o range de 1 dia
+    # volta sem candles. O preço do último fechamento continua válido.
     if len(series) < 2:
-        raise ValueError(f"Yahoo Finance não retornou histórico para {symbol}.")
+        try:
+            wider = await client.get(url, params={"interval": "15m", "range": "5d"})
+            wider.raise_for_status()
+            series = _chart_series(wider.json())
+        except (httpx.HTTPError, ValueError, TypeError, KeyError, IndexError):
+            series = series if series else []
     return {
         "p": price,
         "c": (price / previous - 1) * 100,

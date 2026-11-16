@@ -28,6 +28,46 @@ def test_yahoo_chart_is_normalized_to_quote_change_and_series():
     assert asyncio.run(run()) == {"p": 25, "c": 25, "s": [20, 25]}
 
 
+def _chart(price, previous, closes):
+    return {
+        "chart": {
+            "result": [{
+                "meta": {"regularMarketPrice": price, "previousClose": previous},
+                "indicators": {"quote": [{"close": closes}]},
+            }],
+        },
+    }
+
+
+def test_yahoo_keeps_last_close_when_the_session_has_no_candles():
+    def handle(request):
+        assert request.url.params["interval"] == "15m"
+        if request.url.params["range"] == "1d":
+            return httpx.Response(200, json=_chart(172457.77, 171000, []))
+        assert request.url.params["range"] == "5d"
+        return httpx.Response(200, json=_chart(1, 1, [170000, 171000, 172457.77]))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            return await radar_data.fetch_yahoo_symbol(client, "^BVSP")
+
+    result = asyncio.run(run())
+    assert result["p"] == 172457.77
+    assert result["s"] == [170000, 171000, 172457.77]
+    assert result["c"] != 0
+
+
+def test_yahoo_returns_price_when_no_range_has_candles():
+    def handle(request):
+        return httpx.Response(200, json=_chart(172457.77, 172457.77, []))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            return await radar_data.fetch_yahoo_symbol(client, "^BVSP")
+
+    assert asyncio.run(run()) == {"p": 172457.77, "c": 0, "s": []}
+
+
 def test_weather_fetch_normalizes_all_requested_cities():
     def handle(request):
         assert request.url.host == "api.open-meteo.com"
